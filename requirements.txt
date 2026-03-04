@@ -1,0 +1,7 @@
+python-telegram-bot
+groq
+chromadb
+sentence-transformers
+duckduckgo-search
+pypdf
+python-docx
