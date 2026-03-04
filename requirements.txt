@@ -1,7 +1,3 @@
-python-telegram-bot
+python-telegram-bot==22.6
 groq
-chromadb
-sentence-transformers
 duckduckgo-search
-pypdf
-python-docx
