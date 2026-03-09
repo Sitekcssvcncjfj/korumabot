@@ -8,7 +8,7 @@ from duckduckgo_search import DDGS
 from groq import Groq
 
 TOKEN="8787679143:AAGRBpARDCSG5-ktbmf_fLiIFaDT7IuwP2s"
-GROQ="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"
+GROQ="xai-dMk9Aqhn60822sbDsn78TJAttEZ9jeTGfnq7raRPYSmf7iiu4OvsuIampWKnuESMShlPeE1oYYCgoLhk"
 
 client=Groq(api_key=GROQ)
 
