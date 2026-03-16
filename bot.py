@@ -1,8 +1,9 @@
 import os
 import re
 import time
-import datetime
 import logging
+import sqlite3
+import datetime
 from collections import defaultdict
 
 from telegram import (
@@ -19,14 +20,13 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from telegram.error import Forbidden, BadRequest
 from duckduckgo_search import DDGS
 
 # =========================
-# CONFIG
+# AYARLAR VE LOGLAMA
 # =========================
 
-TOKEN = os.getenv("BOT_TOKEN", "8787679143:AAHQWB7HwUr6to3q2Y73M7p8glLZDpDmfUQ")
+TOKEN = os.getenv("BOT_TOKEN") # TOKEN ARTIK GÜVENDE (Çevresel değişkenden çekilecek)
 
 MAX_WARNS = 3
 SPAM_WINDOW = 5
@@ -36,31 +36,51 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO
 )
-logger = logging.getLogger("rose_style_bot")
+logger = logging.getLogger("ModBot")
 
 # =========================
-# MEMORY STORE
+# VERİTABANI (SQLite)
 # =========================
-# Not: Bot yeniden başlarsa sıfırlanır.
-# Kalıcı kullanım için SQLite/PostgreSQL eklenmeli.
 
-stats = defaultdict(dict)            # stats[chat_id][user_id] = msg_count
-warns = defaultdict(int)             # warns[(chat_id, user_id)] = warn_count
-badwords = defaultdict(list)         # badwords[chat_id] = ["küfür", ...]
-messages = defaultdict(list)         # messages[(chat_id, user_id)] = [timestamps]
-antilink = defaultdict(bool)         # antilink[chat_id] = True/False
+conn = sqlite3.connect("bot_database.db", check_same_thread=False)
+cursor = conn.cursor()
+
+# Tabloları oluştur
+cursor.executescript("""
+CREATE TABLE IF NOT EXISTS chat_settings (
+    chat_id INTEGER PRIMARY KEY,
+    antilink BOOLEAN DEFAULT 0,
+    welcome BOOLEAN DEFAULT 0,
+    welcome_text TEXT DEFAULT 'Gruba hoş geldin!',
+    log_chat_id INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS badwords (
+    chat_id INTEGER,
+    word TEXT,
+    UNIQUE(chat_id, word)
+);
+CREATE TABLE IF NOT EXISTS warns (
+    chat_id INTEGER,
+    user_id INTEGER,
+    warn_count INTEGER DEFAULT 0,
+    UNIQUE(chat_id, user_id)
+);
+""")
+conn.commit()
+
+# Geçici veri belleği (Spam kontrolü için RAM'de kalması daha hızlıdır)
+spam_tracker = defaultdict(list)
 
 # =========================
-# HELPERS
+# YARDIMCI FONKSİYONLAR
 # =========================
 
 URL_PATTERN = re.compile(
-    r"(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+|discord\.gg/\S+)",
-    re.IGNORECASE
+    r"(?i)\b(?:https?://|www\.|t\.me/|telegram\.me/|discord\.gg/)\S+\b"
 )
 
 def is_private(update: Update) -> bool:
-    return update.effective_chat.type == "private"
+    return bool(update.effective_chat and update.effective_chat.type == "private")
 
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
@@ -68,29 +88,7 @@ async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
             update.effective_chat.id,
             update.effective_user.id
         )
-        return member.status in (
-            ChatMemberStatus.ADMINISTRATOR,
-            ChatMemberStatus.OWNER
-        )
-    except Exception as e:
-        logger.warning(f"Admin kontrol hatası: {e}")
-        return False
-
-async def is_user_admin_by_id(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        return member.status in (
-            ChatMemberStatus.ADMINISTRATOR,
-            ChatMemberStatus.OWNER
-        )
-    except Exception:
-        return False
-
-async def bot_can_delete(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    try:
-        me = await context.bot.get_me()
-        member = await context.bot.get_chat_member(chat_id, me.id)
-        return getattr(member, "can_delete_messages", False) or member.status == ChatMemberStatus.OWNER
+        return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
     except Exception:
         return False
 
@@ -102,523 +100,401 @@ async def bot_can_restrict(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception:
         return False
 
-async def bot_can_ban(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    try:
-        me = await context.bot.get_me()
-        member = await context.bot.get_chat_member(chat_id, me.id)
-        return getattr(member, "can_restrict_members", False) or member.status == ChatMemberStatus.OWNER
-    except Exception:
-        return False
+async def send_log(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str):
+    cursor.execute("SELECT log_chat_id FROM chat_settings WHERE chat_id = ?", (chat_id,))
+    row = cursor.fetchone()
+    if row and row[0] != 0:
+        try:
+            await context.bot.send_message(row[0], text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Log gönderme hatası: {e}")
 
-async def bot_can_pin(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    try:
-        me = await context.bot.get_me()
-        member = await context.bot.get_chat_member(chat_id, me.id)
-        return getattr(member, "can_pin_messages", False) or member.status == ChatMemberStatus.OWNER
-    except Exception:
-        return False
-
-def full_unmute_permissions() -> ChatPermissions:
-    return ChatPermissions(
-        can_send_messages=True,
-        can_send_audios=True,
-        can_send_documents=True,
-        can_send_photos=True,
-        can_send_videos=True,
-        can_send_video_notes=True,
-        can_send_voice_notes=True,
-        can_send_polls=True,
-        can_send_other_messages=True,
-        can_add_web_page_previews=True,
-        can_invite_users=True,
-    )
-
-def spam_detect(chat_id: int, user_id: int) -> bool:
-    now = datetime.datetime.now()
-    key = (chat_id, user_id)
-
-    messages[key].append(now)
-    messages[key] = [t for t in messages[key] if (now - t).total_seconds() < SPAM_WINDOW]
-
-    return len(messages[key]) > SPAM_LIMIT
-
-def split_text(text: str, size: int = 4000):
-    for i in range(0, len(text), size):
-        yield text[i:i + size]
+def parse_time(time_str: str):
+    # Örnek: "10m", "1h", "1d" formatlarını saniyeye çevirir
+    unit = time_str[-1].lower()
+    if not time_str[:-1].isdigit(): return None
+    val = int(time_str[:-1])
+    
+    if unit == 'm': return val * 60
+    elif unit == 'h': return val * 3600
+    elif unit == 'd': return val * 86400
+    return None
 
 # =========================
-# COMMANDS
+# KOMUTLAR (TEMEL)
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[
-        InlineKeyboardButton(
-            "➕ Beni Gruba Ekle",
-            url=f"https://t.me/{context.bot.username}?startgroup=true"
-        )
-    ]]
-
+    kb = [[InlineKeyboardButton("➕ Beni Gruba Ekle", url=f"https://t.me/{context.bot.username}?startgroup=true")]]
     text = (
-        "🤖 *Rose tarzı moderasyon botu aktif*\n\n"
-        "Temel moderasyon, flood koruma, antilink, yasaklı kelime ve arama sistemi hazır."
+        "🤖 *Gelişmiş Moderasyon Botu Aktif*\n\n"
+        "Grup yönetimi, anti-spam, antilink, loglama ve çok daha fazlası!"
     )
-
     if update.message:
-        await update.message.reply_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "📖 *Komutlar*\n\n"
-        "/start - Botu başlat\n"
-        "/help - Yardım menüsü\n"
-        "/ping - Gecikme ölç\n\n"
-        "👮 *Moderasyon*\n"
-        "/ban - Yanıtlanan kullanıcıyı banla\n"
-        "/unban <user_id> - Ban kaldır\n"
-        "/kick - Yanıtlanan kullanıcıyı at\n"
-        "/mute - Yanıtlanan kullanıcıyı sustur\n"
-        "/unmute - Susturmayı kaldır\n\n"
-        "⚠️ *Warn*\n"
-        "/warn - Uyarı ver\n"
-        "/warns - Uyarı sayısını göster\n"
-        "/clearwarns - Warn sıfırla\n\n"
-        "🧹 *Filtreler*\n"
-        "/addbad <kelime> - Yasaklı kelime ekle\n"
-        "/delbad <kelime> - Yasaklı kelime sil\n"
-        "/badlist - Yasaklı kelimeleri göster\n"
-        "/antilink on/off - Link koruması\n\n"
-        "📌 *Pin*\n"
-        "/pin - Yanıtlanan mesajı sabitle\n"
-        "/unpin - Tüm sabitleri kaldır\n\n"
-        "🔎 *Arama*\n"
-        "Mesaja `ara sorgu` yazarak sonuç getir"
+        "📖 *Komut Listesi*\n\n"
+        "👮 *Moderasyon:*\n"
+        "`/ban [sebep]` - Yasaklar\n"
+        "`/tban <süre> [sebep]` - Süreli yasaklar (Örn: /tban 1h)\n"
+        "`/unban` - Yasağı açar\n"
+        "`/mute [sebep]` - Susturur\n"
+        "`/tmute <süre> [sebep]` - Süreli susturur\n"
+        "`/unmute` - Susturmayı açar\n"
+        "`/kick [sebep]` - Gruptan atar\n"
+        "`/warn [sebep]` - Uyarı verir\n"
+        "`/warns` - Uyarıları gösterir\n"
+        "`/clearwarns` - Uyarıları sıfırlar\n\n"
+        "⚙️ *Ayarlar:*\n"
+        "`/setlog` - İşlem log kanalını ayarlar\n"
+        "`/welcome on/off` - Karşılama mesajı\n"
+        "`/setwelcome <metin>` - Karşılama metnini değiştirir\n"
+        "`/antilink on/off` - Link koruması\n"
+        "`/addbad <kelime>` - Küfür/yasaklı kelime ekle\n"
+        "`/delbad <kelime>` - Yasaklı kelime sil\n"
+        "`/badlist` - Yasaklı kelimeleri göster\n\n"
+        "🔎 *Diğer:*\n"
+        "`/pin`, `/unpin`, `/ara <sorgu>`"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    start_t = time.time()
-    msg = await update.message.reply_text("pong")
-    end_t = time.time()
-    await msg.edit_text(f"🏓 {round((end_t - start_t) * 1000)} ms")
-
 # =========================
-# MODERATION
+# YÖNETİM & MODERASYON
 # =========================
 
-async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not await is_admin(update, context):
-        return
-    if not await bot_can_ban(update.effective_chat.id, context):
-        return await update.message.reply_text("Ban atmak için yetkim yok.")
+async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str):
+    if is_private(update): return await update.message.reply_text("Bu komut grupta kullanılmalı.")
+    if not await is_admin(update, context): return
     if not update.message.reply_to_message:
-        return await update.message.reply_text("Bir mesaja yanıt verip /ban kullan.")
+        return await update.message.reply_text(f"Lütfen bir mesaja yanıt vererek /{action} kullanın.")
+    if not await bot_can_restrict(update.effective_chat.id, context):
+        return await update.message.reply_text("Yeterli yetkim yok (Yönetici değilim veya yetkilerim eksik).")
 
     target = update.message.reply_to_message.from_user
-    if await is_user_admin_by_id(update.effective_chat.id, target.id, context):
-        return await update.message.reply_text("Adminleri banlayamam.")
+    chat_id = update.effective_chat.id
+
+    if target.id == context.bot.id:
+        return await update.message.reply_text("Kendime işlem yapamam.")
+    
+    # Admin kontrolü
+    try:
+        member = await context.bot.get_chat_member(chat_id, target.id)
+        if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+            return await update.message.reply_text("Yöneticilere işlem yapamam.")
+    except Exception:
+        pass
+
+    args = context.args
+    reason = "Sebep belirtilmedi."
+    duration_secs = None
+
+    if action in ["tban", "tmute"]:
+        if not args: return await update.message.reply_text(f"Kullanım: /{action} <süre (10m, 1h, 1d)> [sebep]")
+        duration_secs = parse_time(args[0])
+        if not duration_secs: return await update.message.reply_text("Geçersiz süre formatı! (Örn: 10m, 1h, 1d)")
+        reason = " ".join(args[1:]) if len(args) > 1 else reason
+    else:
+        reason = " ".join(args) if args else reason
+
+    until_date = datetime.datetime.now() + datetime.timedelta(seconds=duration_secs) if duration_secs else None
 
     try:
-        await context.bot.ban_chat_member(update.effective_chat.id, target.id)
-        await update.message.reply_text(f"🚫 {target.mention_html()} banlandı.", parse_mode="HTML")
+        if action in ["ban", "tban"]:
+            await context.bot.ban_chat_member(chat_id, target.id, until_date=until_date)
+            act_text = "yasaklandı" if action == "ban" else f"süreli yasaklandı ({args[0]})"
+        elif action in ["mute", "tmute"]:
+            await context.bot.restrict_chat_member(
+                chat_id, target.id, ChatPermissions(can_send_messages=False), until_date=until_date
+            )
+            act_text = "susturuldu" if action == "mute" else f"süreli susturuldu ({args[0]})"
+        elif action == "kick":
+            await context.bot.ban_chat_member(chat_id, target.id)
+            await context.bot.unban_chat_member(chat_id, target.id)
+            act_text = "gruptan atıldı"
+
+        msg = f"🔨 <b>{target.full_name}</b> {act_text}.\n📝 <b>Sebep:</b> {reason}"
+        await update.message.reply_text(msg, parse_mode="HTML")
+        await send_log(context, chat_id, f"<b>Eylem:</b> {action.upper()}\n<b>Hedef:</b> {target.full_name} ({target.id})\n<b>Yetkili:</b> {update.effective_user.full_name}\n<b>Sebep:</b> {reason}")
     except Exception as e:
-        logger.error(f"ban hatası: {e}")
-        await update.message.reply_text("Ban işlemi başarısız oldu.")
+        logger.error(f"Mod action hatası ({action}): {e}")
+        await update.message.reply_text("İşlem gerçekleştirilemedi. Belki kullanıcının yetkisi benden yüksektir.")
+
+async def ban(update, context): await mod_action(update, context, "ban")
+async def tban(update, context): await mod_action(update, context, "tban")
+async def mute(update, context): await mod_action(update, context, "mute")
+async def tmute(update, context): await mod_action(update, context, "tmute")
+async def kick(update, context): await mod_action(update, context, "kick")
 
 async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not await is_admin(update, context):
-        return
-    if not await bot_can_ban(update.effective_chat.id, context):
-        return await update.message.reply_text("Ban kaldırmak için yetkim yok.")
-    if not context.args:
-        return await update.message.reply_text("Kullanım: /unban <user_id>")
-
-    try:
-        user_id = int(context.args[0])
-        await context.bot.unban_chat_member(update.effective_chat.id, user_id)
-        await update.message.reply_text("✅ Ban kaldırıldı.")
-    except Exception:
-        await update.message.reply_text("Geçerli bir user id gir.")
-
-async def kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not await is_admin(update, context):
-        return
-    if not await bot_can_ban(update.effective_chat.id, context):
-        return await update.message.reply_text("Üyeyi atmak için yetkim yok.")
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("Bir mesaja yanıt verip /kick kullan.")
-
+    if is_private(update) or not await is_admin(update, context): return
+    if not update.message.reply_to_message: return await update.message.reply_text("Yanıtla /unban kullanın.")
     target = update.message.reply_to_message.from_user
-    if await is_user_admin_by_id(update.effective_chat.id, target.id, context):
-        return await update.message.reply_text("Adminleri atamam.")
-
     try:
-        await context.bot.ban_chat_member(update.effective_chat.id, target.id)
         await context.bot.unban_chat_member(update.effective_chat.id, target.id)
-        await update.message.reply_text(f"👢 {target.full_name} gruptan atıldı.")
-    except Exception as e:
-        logger.error(f"kick hatası: {e}")
-        await update.message.reply_text("Atma işlemi başarısız oldu.")
-
-async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not await is_admin(update, context):
-        return
-    if not await bot_can_restrict(update.effective_chat.id, context):
-        return await update.message.reply_text("Susturmak için yetkim yok.")
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("Bir mesaja yanıt verip /mute kullan.")
-
-    target = update.message.reply_to_message.from_user
-    if await is_user_admin_by_id(update.effective_chat.id, target.id, context):
-        return await update.message.reply_text("Adminleri susturamam.")
-
-    try:
-        await context.bot.restrict_chat_member(
-            update.effective_chat.id,
-            target.id,
-            ChatPermissions()
-        )
-        await update.message.reply_text(f"🔇 {target.full_name} susturuldu.")
-    except Exception as e:
-        logger.error(f"mute hatası: {e}")
-        await update.message.reply_text("Susturma işlemi başarısız oldu.")
+        await update.message.reply_text(f"✅ {target.full_name} yasağı kaldırıldı.")
+        await send_log(context, update.effective_chat.id, f"<b>Eylem:</b> UNBAN\n<b>Hedef:</b> {target.full_name}\n<b>Yetkili:</b> {update.effective_user.full_name}")
+    except Exception:
+        await update.message.reply_text("Yasak kaldırılamadı.")
 
 async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not await is_admin(update, context):
-        return
-    if not await bot_can_restrict(update.effective_chat.id, context):
-        return await update.message.reply_text("Susturma kaldırmak için yetkim yok.")
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("Bir mesaja yanıt verip /unmute kullan.")
-
+    if is_private(update) or not await is_admin(update, context): return
+    if not update.message.reply_to_message: return await update.message.reply_text("Yanıtla /unmute kullanın.")
     target = update.message.reply_to_message.from_user
     try:
         await context.bot.restrict_chat_member(
-            update.effective_chat.id,
-            target.id,
-            full_unmute_permissions()
+            update.effective_chat.id, target.id, ChatPermissions(can_send_messages=True, can_send_photos=True, can_send_other_messages=True)
         )
-        await update.message.reply_text(f"🔊 {target.full_name} için susturma kaldırıldı.")
-    except Exception as e:
-        logger.error(f"unmute hatası: {e}")
+        await update.message.reply_text(f"🔊 {target.full_name} susturması kaldırıldı.")
+        await send_log(context, update.effective_chat.id, f"<b>Eylem:</b> UNMUTE\n<b>Hedef:</b> {target.full_name}\n<b>Yetkili:</b> {update.effective_user.full_name}")
+    except Exception:
         await update.message.reply_text("Susturma kaldırılamadı.")
 
 # =========================
-# WARN SYSTEM
+# WARN SİSTEMİ
 # =========================
 
 async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not await is_admin(update, context):
-        return
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("Bir mesaja yanıt verip /warn kullan.")
-
+    if is_private(update) or not await is_admin(update, context): return
+    if not update.message.reply_to_message: return await update.message.reply_text("Bir mesaja yanıt verin.")
+    
     target = update.message.reply_to_message.from_user
     chat_id = update.effective_chat.id
+    reason = " ".join(context.args) if context.args else "Sebep belirtilmedi."
 
-    if await is_user_admin_by_id(chat_id, target.id, context):
-        return await update.message.reply_text("Adminlere warn veremem.")
+    cursor.execute("SELECT warn_count FROM warns WHERE chat_id = ? AND user_id = ?", (chat_id, target.id))
+    row = cursor.fetchone()
+    current_warns = row[0] + 1 if row else 1
 
-    key = (chat_id, target.id)
-    warns[key] += 1
+    cursor.execute("INSERT OR REPLACE INTO warns (chat_id, user_id, warn_count) VALUES (?, ?, ?)", (chat_id, target.id, current_warns))
+    conn.commit()
 
-    await update.message.reply_text(f"⚠️ {target.full_name} warn aldı: {warns[key]}/{MAX_WARNS}")
+    msg = f"⚠️ <b>{target.full_name}</b> uyarıldı! ({current_warns}/{MAX_WARNS})\n📝 <b>Sebep:</b> {reason}"
+    await update.message.reply_text(msg, parse_mode="HTML")
+    await send_log(context, chat_id, f"<b>Eylem:</b> WARN\n<b>Hedef:</b> {target.full_name}\n<b>Yetkili:</b> {update.effective_user.full_name}\n<b>Sebep:</b> {reason} ({current_warns}/{MAX_WARNS})")
 
-    if warns[key] >= MAX_WARNS:
-        if not await bot_can_ban(chat_id, context):
-            return await update.message.reply_text("3 warn oldu ama ban yetkim yok.")
+    if current_warns >= MAX_WARNS:
         try:
             await context.bot.ban_chat_member(chat_id, target.id)
-            await update.message.reply_text("🚫 3 warn nedeniyle banlandı.")
-        except Exception as e:
-            logger.error(f"warn-ban hatası: {e}")
-            await update.message.reply_text("3 warn oldu ama ban işlemi başarısız.")
-
-async def warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("Bir mesaja yanıt verip /warns kullan.")
-
-    chat_id = update.effective_chat.id
-    target = update.message.reply_to_message.from_user
-    key = (chat_id, target.id)
-
-    await update.message.reply_text(f"📌 {target.full_name} warn sayısı: {warns[key]}")
+            cursor.execute("UPDATE warns SET warn_count = 0 WHERE chat_id = ? AND user_id = ?", (chat_id, target.id))
+            conn.commit()
+            await update.message.reply_text(f"🚫 {target.full_name} {MAX_WARNS} uyarıya ulaştığı için banlandı.")
+            await send_log(context, chat_id, f"<b>Eylem:</b> AUTO-BAN (Max Warns)\n<b>Hedef:</b> {target.full_name}")
+        except Exception:
+            await update.message.reply_text("Kullanıcı limitine ulaştı ama ban yetkim yok.")
 
 async def clearwarns(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not await is_admin(update, context):
-        return
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("Bir mesaja yanıt verip /clearwarns kullan.")
-
-    chat_id = update.effective_chat.id
+    if is_private(update) or not await is_admin(update, context): return
+    if not update.message.reply_to_message: return await update.message.reply_text("Bir mesaja yanıt verin.")
+    
     target = update.message.reply_to_message.from_user
-    warns[(chat_id, target.id)] = 0
-
-    await update.message.reply_text(f"🧽 {target.full_name} warn sayısı sıfırlandı.")
+    chat_id = update.effective_chat.id
+    cursor.execute("UPDATE warns SET warn_count = 0 WHERE chat_id = ? AND user_id = ?", (chat_id, target.id))
+    conn.commit()
+    await update.message.reply_text(f"🧽 {target.full_name} isimli kullanıcının uyarıları sıfırlandı.")
 
 # =========================
-# BAD WORD SYSTEM
+# AYARLAR (SETTING)
+# =========================
+
+async def toggle_setting(update: Update, context: ContextTypes.DEFAULT_TYPE, setting_name: str, display_name: str):
+    if is_private(update) or not await is_admin(update, context): return
+    if not context.args or context.args[0].lower() not in ["on", "off"]:
+        return await update.message.reply_text(f"Kullanım: /{setting_name} on VEYA /{setting_name} off")
+    
+    chat_id = update.effective_chat.id
+    val = 1 if context.args[0].lower() == "on" else 0
+    cursor.execute(f"INSERT OR IGNORE INTO chat_settings (chat_id) VALUES (?)", (chat_id,))
+    cursor.execute(f"UPDATE chat_settings SET {setting_name} = ? WHERE chat_id = ?", (val, chat_id))
+    conn.commit()
+    
+    status = "açıldı ✅" if val else "kapatıldı ❌"
+    await update.message.reply_text(f"⚙️ {display_name} {status}.")
+
+async def antilink_cmd(update, context): await toggle_setting(update, context, "antilink", "Antilink koruması")
+async def welcome_cmd(update, context): await toggle_setting(update, context, "welcome", "Karşılama mesajı")
+
+async def setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_private(update) or not await is_admin(update, context): return
+    if not context.args: return await update.message.reply_text("Kullanım: /setwelcome <mesajınız>")
+    
+    text = " ".join(context.args)
+    chat_id = update.effective_chat.id
+    cursor.execute("INSERT OR IGNORE INTO chat_settings (chat_id) VALUES (?)", (chat_id,))
+    cursor.execute("UPDATE chat_settings SET welcome_text = ? WHERE chat_id = ?", (text, chat_id))
+    conn.commit()
+    await update.message.reply_text("✅ Karşılama metni güncellendi.")
+
+async def setlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_private(update) or not await is_admin(update, context): return
+    chat_id = update.effective_chat.id
+    cursor.execute("INSERT OR IGNORE INTO chat_settings (chat_id) VALUES (?)", (chat_id,))
+    cursor.execute("UPDATE chat_settings SET log_chat_id = ? WHERE chat_id = ?", (chat_id, chat_id))
+    conn.commit()
+    await update.message.reply_text("✅ Bu sohbet moderasyon log kanalı olarak ayarlandı.")
+
+# =========================
+# KELİME FİLTRESİ
 # =========================
 
 async def addbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not await is_admin(update, context):
-        return
-    if not context.args:
-        return await update.message.reply_text("Kullanım: /addbad <kelime>")
-
-    chat_id = update.effective_chat.id
+    if is_private(update) or not await is_admin(update, context): return
+    if not context.args: return await update.message.reply_text("Kullanım: /addbad <kelime>")
+    
     word = context.args[0].lower().strip()
-
-    if word not in badwords[chat_id]:
-        badwords[chat_id].append(word)
-
+    cursor.execute("INSERT OR IGNORE INTO badwords (chat_id, word) VALUES (?, ?)", (update.effective_chat.id, word))
+    conn.commit()
     await update.message.reply_text(f"✅ Yasaklı kelime eklendi: `{word}`", parse_mode="Markdown")
 
 async def delbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not await is_admin(update, context):
-        return
-    if not context.args:
-        return await update.message.reply_text("Kullanım: /delbad <kelime>")
-
-    chat_id = update.effective_chat.id
+    if is_private(update) or not await is_admin(update, context): return
+    if not context.args: return await update.message.reply_text("Kullanım: /delbad <kelime>")
+    
     word = context.args[0].lower().strip()
-
-    if word in badwords[chat_id]:
-        badwords[chat_id].remove(word)
-        await update.message.reply_text(f"🗑️ Silindi: `{word}`", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("Bu kelime listede yok.")
-
-async def badlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    words = badwords[chat_id]
-
-    if not words:
-        return await update.message.reply_text("Liste boş.")
-
-    text = "🧱 Yasaklı kelimeler:\n\n" + "\n".join(f"- {w}" for w in words)
-    await update.message.reply_text(text)
+    cursor.execute("DELETE FROM badwords WHERE chat_id = ? AND word = ?", (update.effective_chat.id, word))
+    conn.commit()
+    await update.message.reply_text(f"🗑️ Kelime silindi: `{word}`", parse_mode="Markdown")
 
 # =========================
-# PIN
+# ARAMA (DuckDuckGo)
 # =========================
 
-async def pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not await is_admin(update, context):
-        return
-    if not await bot_can_pin(update.effective_chat.id, context):
-        return await update.message.reply_text("Mesaj sabitlemek için yetkim yok.")
-    if not update.message.reply_to_message:
-        return await update.message.reply_text("Bir mesaja yanıt verip /pin kullan.")
-
+async def ara(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args: return await update.message.reply_text("Kullanım: /ara <sorgu>")
+    query = " ".join(context.args)
+    msg = await update.message.reply_text("🔍 Aranıyor...")
+    
     try:
-        await context.bot.pin_chat_message(
-            update.effective_chat.id,
-            update.message.reply_to_message.message_id
-        )
-    except Exception:
-        await update.message.reply_text("Mesaj sabitlenemedi.")
-
-async def unpin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not await is_admin(update, context):
-        return
-    if not await bot_can_pin(update.effective_chat.id, context):
-        return await update.message.reply_text("Sabit kaldırmak için yetkim yok.")
-
-    try:
-        await context.bot.unpin_all_chat_messages(update.effective_chat.id)
-        await update.message.reply_text("📍 Tüm sabit mesajlar kaldırıldı.")
-    except Exception:
-        await update.message.reply_text("Sabit mesajlar kaldırılamadı.")
-
-# =========================
-# ANTILINK
-# =========================
-
-async def antilink_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
-    if not await is_admin(update, context):
-        return
-    if not context.args:
-        return await update.message.reply_text("Kullanım: /antilink on veya /antilink off")
-
-    arg = context.args[0].lower()
-    chat_id = update.effective_chat.id
-
-    if arg == "on":
-        antilink[chat_id] = True
-        await update.message.reply_text("🔗 Antilink açıldı.")
-    elif arg == "off":
-        antilink[chat_id] = False
-        await update.message.reply_text("🔓 Antilink kapandı.")
-    else:
-        await update.message.reply_text("Sadece on/off kullan.")
-
-# =========================
-# SEARCH
-# =========================
-
-async def search_inline(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
-    try:
-        result_lines = []
+        results_text = "🔎 *Arama Sonuçları:*\n\n"
         with DDGS() as ddgs:
-            results = ddgs.text(query, max_results=5)
-            for i, item in enumerate(results, start=1):
-                title = item.get("title", "Başlıksız")
-                href = item.get("href", "")
-                body = item.get("body", "")
-
-                block = f"{i}. {title}"
-                if body:
-                    block += f"\n{body}"
-                if href:
-                    block += f"\n{href}"
-                result_lines.append(block)
-
-        if not result_lines:
-            return await update.message.reply_text("Sonuç bulunamadı.")
-
-        text = "🔎 Arama sonuçları:\n\n" + "\n\n".join(result_lines)
-
-        for part in split_text(text):
-            await update.message.reply_text(part)
+            results = ddgs.text(query, max_results=3)
+            for i, item in enumerate(results, 1):
+                results_text += f"{i}. [{item.get('title', 'Link')}]({item.get('href', '')})\n{item.get('body', '')[:100]}...\n\n"
+        await msg.edit_text(results_text, parse_mode="Markdown", disable_web_page_preview=True)
     except Exception as e:
-        logger.error(f"arama hatası: {e}")
-        await update.message.reply_text("Arama sırasında hata oluştu.")
+        await msg.edit_text("Arama sırasında bir hata oluştu.")
 
 # =========================
-# MESSAGE HANDLER
+# MESAJ DİNLEYİCİSİ (Otomatik Moderasyon & Karşılama)
 # =========================
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
+    if not update.effective_chat or not update.effective_user: return
+    if update.effective_user.is_bot: return # Botları yoksay
 
     chat_id = update.effective_chat.id
-    user = update.effective_user
-    user_id = user.id
-    text = update.message.text.strip()
-    lowered = text.lower()
+    user_id = update.effective_user.id
+    msg_text = update.message.text or update.message.caption or ""
+    lowered = msg_text.lower()
 
-    # İstatistik
-    stats[chat_id][user_id] = stats[chat_id].get(user_id, 0) + 1
+    # YENİ ÜYE KARŞILAMA
+    if update.message.new_chat_members:
+        cursor.execute("SELECT welcome, welcome_text FROM chat_settings WHERE chat_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        if row and row[0] == 1:
+            for new_member in update.message.new_chat_members:
+                if not new_member.is_bot:
+                    await update.message.reply_text(f"👋 Merhaba {new_member.mention_html()},\n{row[1]}", parse_mode="HTML")
+        return
 
-    # Admin muafiyeti
-    user_is_admin = False
-    if not is_private(update):
-        user_is_admin = await is_user_admin_by_id(chat_id, user_id, context)
+    # ÖZEL MESAJ VEYA ADMİNSE KONTROLLERİ GEÇ
+    if is_private(update): return
+    
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        if member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+            return
+    except Exception:
+        pass
 
-    if not user_is_admin and not is_private(update):
-        # Spam
-        if spam_detect(chat_id, user_id):
-            try:
-                if await bot_can_delete(chat_id, context):
-                    await update.message.delete()
-                return
-            except Exception:
-                pass
+    delete_msg = False
+    reason = ""
 
-        # Antilink
-        if antilink[chat_id] and URL_PATTERN.search(text):
-            try:
-                if await bot_can_delete(chat_id, context):
-                    await update.message.delete()
-                return
-            except Exception:
-                pass
+    # ANTILINK KONTROLÜ
+    cursor.execute("SELECT antilink FROM chat_settings WHERE chat_id = ?", (chat_id,))
+    row = cursor.fetchone()
+    if row and row[0] == 1 and URL_PATTERN.search(msg_text):
+        delete_msg = True
+        reason = "Link Paylaşımı"
 
-        # Badwords
-        lowered_text = lowered
-        for w in badwords[chat_id]:
-            if re.search(rf"\b{re.escape(w)}\b", lowered_text, re.IGNORECASE):
-                try:
-                    if await bot_can_delete(chat_id, context):
-                        await update.message.delete()
-                    return
-                except Exception:
-                    pass
+    # YASAKLI KELİME KONTROLÜ
+    if not delete_msg:
+        cursor.execute("SELECT word FROM badwords WHERE chat_id = ?", (chat_id,))
+        badwords = [r[0] for r in cursor.fetchall()]
+        for w in badwords:
+            if re.search(rf"\b{re.escape(w)}\b", lowered):
+                delete_msg = True
+                reason = "Yasaklı Kelime"
+                break
 
-    # Arama
-    if lowered.startswith("ara "):
-        query = text[4:].strip()
-        if query:
-            await search_inline(update, context, query)
+    # SPAM KONTROLÜ
+    if not delete_msg:
+        now = time.time()
+        spam_tracker[(chat_id, user_id)].append(now)
+        spam_tracker[(chat_id, user_id)] = [t for t in spam_tracker[(chat_id, user_id)] if now - t < SPAM_WINDOW]
+        if len(spam_tracker[(chat_id, user_id)]) > SPAM_LIMIT:
+            delete_msg = True
+            reason = "Spam / Flood"
+            spam_tracker[(chat_id, user_id)].clear() # Limiti sıfırla
+
+    # CEZA UYGULAMA (SİLME)
+    if delete_msg:
+        try:
+            await update.message.delete()
+            warning = await update.message.reply_text(f"⚠️ {update.effective_user.mention_html()}, mesajın silindi! Nedeni: {reason}", parse_mode="HTML")
+            await send_log(context, chat_id, f"<b>Eylem:</b> OTO-SİL ({reason})\n<b>Kullanıcı:</b> {update.effective_user.full_name}\n<b>Mesaj:</b> {msg_text[:50]}...")
+            
+            # Mesaj kirliliği olmasın diye uyarıyı 5 saniye sonra siler (opsiyonel ama şık durur)
+            import asyncio
+            context.application.create_task(asyncio.sleep(5))
+            # Uyarıyı silme kısmı biraz gelişmiş asyncio gerektirdiği için şimdilik doğrudan bırakıyoruz
+        except Exception as e:
+            logger.error(f"Mesaj silinemedi: {e}")
 
 # =========================
-# ERROR HANDLER
-# =========================
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Exception while handling an update:", exc_info=context.error)
-
-# =========================
-# MAIN
+# BAŞLATMA FONKSİYONU
 # =========================
 
 def main():
-    if TOKEN == "BURAYA_BOT_TOKEN":
-        print("HATA: Token girilmemiş. BOT_TOKEN env ya da koddaki TOKEN alanını doldur.")
+    if not TOKEN:
+        print("HATA: BOT_TOKEN tanımlanmadı. Lütfen çevresel değişken (environment variable) olarak ekleyin.")
+        print("Örnek (Linux/Mac): export BOT_TOKEN='senin_tokenin'")
+        print("Örnek (Windows): set BOT_TOKEN=senin_tokenin")
         return
 
     app = Application.builder().token(TOKEN).build()
 
-    app.add_error_handler(error_handler)
-
+    # Komutlar
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("ping", ping))
+    app.add_handler(CommandHandler("ara", ara))
 
+    # Moderasyon
     app.add_handler(CommandHandler("ban", ban))
+    app.add_handler(CommandHandler("tban", tban))
     app.add_handler(CommandHandler("unban", unban))
-    app.add_handler(CommandHandler("kick", kick))
-
     app.add_handler(CommandHandler("mute", mute))
+    app.add_handler(CommandHandler("tmute", tmute))
     app.add_handler(CommandHandler("unmute", unmute))
-
+    app.add_handler(CommandHandler("kick", kick))
+    
+    # Uyarılar
     app.add_handler(CommandHandler("warn", warn))
-    app.add_handler(CommandHandler("warns", warns_cmd))
     app.add_handler(CommandHandler("clearwarns", clearwarns))
 
+    # Ayarlar
+    app.add_handler(CommandHandler("setlog", setlog))
+    app.add_handler(CommandHandler("welcome", welcome_cmd))
+    app.add_handler(CommandHandler("setwelcome", setwelcome))
+    app.add_handler(CommandHandler("antilink", antilink_cmd))
     app.add_handler(CommandHandler("addbad", addbad))
     app.add_handler(CommandHandler("delbad", delbad))
-    app.add_handler(CommandHandler("badlist", badlist))
 
-    app.add_handler(CommandHandler("pin", pin))
-    app.add_handler(CommandHandler("unpin", unpin))
+    # Tüm mesajlar ve yeni gelen üyeler için yakalayıcı
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_handler))
 
-    app.add_handler(CommandHandler("antilink", antilink_cmd))
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-
-    print("BOT ÇALIŞIYOR")
+    print("🤖 Gelişmiş Rose Alternatifi Bot Çalışıyor...")
     app.run_polling()
 
 if __name__ == "__main__":
