@@ -30,7 +30,7 @@ from duckduckgo_search import DDGS
 TOKEN = os.getenv("BOT_TOKEN")
 
 BOT_USERNAME_TEXT = "@KGBKORUMABot"
-SUPPORT_URL = "https://t.me/KGBKORUMA"   # kendi kanal / destek linkinle değiştir
+SUPPORT_URL = "https://t.me/KGBotomasyon"   # kendi kanal / destek linkinle değiştir
 SOURCE_URL = "https://github.com/"       # istersen repo linkini koy
 MAX_WARNS = 3
 SPAM_WINDOW = 5
