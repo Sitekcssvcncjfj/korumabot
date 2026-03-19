@@ -33,6 +33,11 @@ SUPPORT_URL = "https://t.me/KGBotomasyon"
 MAX_WARNS = 3
 SPAM_WINDOW = 5
 SPAM_LIMIT = 5
+PURGE_LIMIT = 100
+MAX_NOTE_NAME = 32
+MAX_NOTE_TEXT = 3000
+MAX_FILTER_TRIGGER = 64
+MAX_FILTER_REPLY = 3000
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -256,7 +261,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👉 Beni gruba ekleyin ve yönetici yapın.\n"
         "👉 Komutları hem / hem . ile kullanabilirsiniz."
     )
-    await update.message.reply_text(text, reply_markup=main_menu_markup(), parse_mode="HTML")
+    if update.message:
+        await update.message.reply_text(text, reply_markup=main_menu_markup(), parse_mode="HTML")
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -339,17 +345,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📚 Kategori seç:", reply_markup=help_menu_markup(), parse_mode="HTML")
+    if update.message:
+        await update.message.reply_text("📚 Kategori seç:", reply_markup=help_menu_markup(), parse_mode="HTML")
 
 async def yardim(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔧 Botu gruba ekle, yönetici yap, gerekli yetkileri ver. Komutları / veya . ile kullan.",
-        parse_mode="HTML"
-    )
+    if update.message:
+        await update.message.reply_text(
+            "🔧 Botu gruba ekle, yönetici yap, gerekli yetkileri ver. Komutları / veya . ile kullan.",
+            parse_mode="HTML"
+        )
 
 async def destek(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🆘 Destek", url=SUPPORT_URL)]])
-    await update.message.reply_text("Destek için tıkla.", reply_markup=kb)
+    if update.message:
+        await update.message.reply_text("Destek için tıkla.", reply_markup=kb)
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = time.time()
@@ -442,6 +451,7 @@ async def ara(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str):
     if not await require_admin(update, context):
         return
+
     actor_member = await get_member_status(update.effective_chat.id, update.effective_user.id, context)
     if not actor_member:
         return await update.message.reply_text("Yetki bilgisi alınamadı.")
@@ -537,6 +547,9 @@ async def kick(update: Update, context: ContextTypes.DEFAULT_TYPE): await mod_ac
 async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
+    actor_member = await get_member_status(update.effective_chat.id, update.effective_user.id, context)
+    if actor_member.status != ChatMemberStatus.OWNER and not getattr(actor_member, "can_restrict_members", False):
+        return await update.message.reply_text("Ban kaldırmak için yetkin yok.")
     if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
         return await update.message.reply_text("Bir kullanıcı mesajına yanıt verip /unban kullan.")
     cid = update.effective_chat.id
@@ -552,6 +565,9 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
+    actor_member = await get_member_status(update.effective_chat.id, update.effective_user.id, context)
+    if actor_member.status != ChatMemberStatus.OWNER and not getattr(actor_member, "can_restrict_members", False):
+        return await update.message.reply_text("Susturma kaldırmak için yetkin yok.")
     if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
         return await update.message.reply_text("Bir kullanıcı mesajına yanıt verip /unmute kullan.")
     cid = update.effective_chat.id
@@ -568,6 +584,8 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     actor_member = await get_member_status(update.effective_chat.id, update.effective_user.id, context)
+    if not actor_member:
+        return await update.message.reply_text("Yetki bilgisi alınamadı.")
     if actor_member.status != ChatMemberStatus.OWNER and not getattr(actor_member, "can_promote_members", False):
         return await update.message.reply_text("Admin vermek için yetkin yok.")
     if not await bot_can_promote(update.effective_chat.id, context):
@@ -575,6 +593,10 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
         return await update.message.reply_text("Bir kullanıcıya yanıt verip /admin kullan.")
     target = update.message.reply_to_message.from_user
+    if target.id == update.effective_user.id:
+        return await update.message.reply_text("Kendine admin veremezsin.")
+    if await is_admin_user(update.effective_chat.id, target.id, context):
+        return await update.message.reply_text("Bu kullanıcı zaten yönetici.")
     try:
         await context.bot.promote_chat_member(
             chat_id=update.effective_chat.id,
@@ -590,6 +612,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         msg = await update.message.reply_text(f"👑 {target.full_name} admin yapıldı.")
         context.application.create_task(delete_later(msg, 5))
+        await send_log(context, update.effective_chat.id, f"<b>Eylem:</b> ADMIN VER\n<b>Hedef:</b> {html.escape(target.full_name)}")
     except Exception:
         await update.message.reply_text("Kullanıcı admin yapılamadı.")
 
@@ -597,6 +620,8 @@ async def unadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
     actor_member = await get_member_status(update.effective_chat.id, update.effective_user.id, context)
+    if not actor_member:
+        return await update.message.reply_text("Yetki bilgisi alınamadı.")
     if actor_member.status != ChatMemberStatus.OWNER and not getattr(actor_member, "can_promote_members", False):
         return await update.message.reply_text("Admin almak için yetkin yok.")
     if not await bot_can_promote(update.effective_chat.id, context):
@@ -604,6 +629,9 @@ async def unadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
         return await update.message.reply_text("Bir kullanıcıya yanıt verip /unadmin kullan.")
     target = update.message.reply_to_message.from_user
+    target_member = await get_member_status(update.effective_chat.id, target.id, context)
+    if not target_member or target_member.status == ChatMemberStatus.OWNER:
+        return await update.message.reply_text("Bu kullanıcıdan adminlik alınamaz.")
     try:
         await context.bot.promote_chat_member(
             chat_id=update.effective_chat.id,
@@ -619,6 +647,7 @@ async def unadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         msg = await update.message.reply_text(f"⬇️ {target.full_name} adminlikten alındı.")
         context.application.create_task(delete_later(msg, 5))
+        await send_log(context, update.effective_chat.id, f"<b>Eylem:</b> ADMIN AL\n<b>Hedef:</b> {html.escape(target.full_name)}")
     except Exception:
         await update.message.reply_text("Kullanıcının adminliği alınamadı.")
 
@@ -729,7 +758,8 @@ async def setgoodbye(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(delete_later(msg, 5))
 
 async def setlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context): return
+    if not await require_admin(update, context):
+        return
     cid = update.effective_chat.id
     ensure_chat_settings(cid)
     target_log_id = cid
@@ -738,6 +768,12 @@ async def setlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_log_id = int(context.args[0])
         except Exception:
             return await update.message.reply_text("Kullanım: /setlog veya /setlog <chat_id>")
+
+    try:
+        await context.bot.send_message(target_log_id, f"✅ Test log mesajı.\nKaynak chat: <code>{cid}</code>", parse_mode="HTML")
+    except Exception:
+        return await update.message.reply_text("Bu log chat id'ye mesaj atamıyorum. Beni o sohbete ekleyip yetki ver.")
+
     cursor.execute("UPDATE chat_settings SET log_chat_id = ? WHERE chat_id = ?", (target_log_id, cid))
     conn.commit()
     msg = await update.message.reply_text(f"✅ Log sohbeti ayarlandı: <code>{target_log_id}</code>", parse_mode="HTML")
@@ -754,8 +790,8 @@ async def setrules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(delete_later(msg, 5))
 
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update):
-        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
+    if not await require_admin(update, context):
+        return
     cid = update.effective_chat.id
     ensure_chat_settings(cid)
     cursor.execute("""
@@ -827,11 +863,13 @@ async def delbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(delete_later(msg, 5))
 
 async def badlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update): return await update.message.reply_text("Bu komut grupta kullanılmalı.")
+    if not await require_admin(update, context):
+        return
     cid = update.effective_chat.id
     cursor.execute("SELECT word FROM badwords WHERE chat_id = ? ORDER BY word ASC", (cid,))
     rows = cursor.fetchall()
-    if not rows: return await update.message.reply_text("Liste boş.")
+    if not rows:
+        return await update.message.reply_text("Liste boş.")
     text = "🧱 <b>Yasaklı Kelimeler</b>\n\n" + "\n".join(f"• <code>{html.escape(r[0])}</code>" for r in rows)
     for p in split_text(text):
         await update.message.reply_text(p, parse_mode="HTML")
@@ -858,12 +896,18 @@ async def unpin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Sabit mesajlar kaldırılamadı.")
 
 async def purge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context): return
-    if not await bot_can_delete(update.effective_chat.id, context): return await update.message.reply_text("Botun mesaj silme yetkisi yok.")
-    if not update.message.reply_to_message: return await update.message.reply_text("Bir mesaja yanıt verip /purge kullan.")
+    if not await require_admin(update, context):
+        return
+    if not await bot_can_delete(update.effective_chat.id, context):
+        return await update.message.reply_text("Botun mesaj silme yetkisi yok.")
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("Bir mesaja yanıt verip /purge kullan.")
     try:
         start_id = update.message.reply_to_message.message_id
         end_id = update.message.message_id
+        amount = end_id - start_id + 1
+        if amount > PURGE_LIMIT:
+            return await update.message.reply_text(f"En fazla {PURGE_LIMIT} mesaj temizleyebilirim.")
         deleted = 0
         for msg_id in range(start_id, end_id + 1):
             try:
@@ -878,7 +922,6 @@ async def purge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"purge hatası: {e}")
         await update.message.reply_text("Purge işlemi başarısız oldu.")
 
-# Notes
 async def save_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context): return
     if len(context.args) < 2:
@@ -886,6 +929,10 @@ async def save_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     name = context.args[0].lower()
     text = " ".join(context.args[1:])
+    if len(name) > MAX_NOTE_NAME:
+        return await update.message.reply_text(f"Not adı en fazla {MAX_NOTE_NAME} karakter olabilir.")
+    if len(text) > MAX_NOTE_TEXT:
+        return await update.message.reply_text(f"Not içeriği en fazla {MAX_NOTE_TEXT} karakter olabilir.")
     cursor.execute("INSERT OR REPLACE INTO notes (chat_id, note_name, note_text) VALUES (?, ?, ?)", (cid, name, text))
     conn.commit()
     await update.message.reply_text(f"💾 Not kaydedildi: #{name}")
@@ -913,7 +960,8 @@ async def clear_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🗑️ Not silindi: #{name}")
 
 async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update): return await update.message.reply_text("Bu komut grupta kullanılmalı.")
+    if not await require_admin(update, context):
+        return
     cid = update.effective_chat.id
     cursor.execute("SELECT note_name FROM notes WHERE chat_id = ? ORDER BY note_name", (cid,))
     rows = cursor.fetchall()
@@ -922,7 +970,6 @@ async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "📝 <b>Notlar</b>\n\n" + "\n".join(f"• #{r[0]}" for r in rows)
     await update.message.reply_text(text, parse_mode="HTML")
 
-# Filters
 async def add_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context): return
     if len(context.args) < 2:
@@ -930,6 +977,10 @@ async def add_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     trigger = context.args[0].lower()
     reply = " ".join(context.args[1:])
+    if len(trigger) > MAX_FILTER_TRIGGER:
+        return await update.message.reply_text(f"Tetik en fazla {MAX_FILTER_TRIGGER} karakter olabilir.")
+    if len(reply) > MAX_FILTER_REPLY:
+        return await update.message.reply_text(f"Cevap en fazla {MAX_FILTER_REPLY} karakter olabilir.")
     cursor.execute("INSERT OR REPLACE INTO filters_table (chat_id, trigger_text, reply_text) VALUES (?, ?, ?)", (cid, trigger, reply))
     conn.commit()
     await update.message.reply_text(f"✅ Filter eklendi: {trigger}")
@@ -945,7 +996,8 @@ async def stop_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🗑️ Filter silindi: {trigger}")
 
 async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_private(update): return await update.message.reply_text("Bu komut grupta kullanılmalı.")
+    if not await require_admin(update, context):
+        return
     cid = update.effective_chat.id
     cursor.execute("SELECT trigger_text FROM filters_table WHERE chat_id = ? ORDER BY trigger_text", (cid,))
     rows = cursor.fetchall()
@@ -957,10 +1009,19 @@ async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def dot_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
+
     cmd, args = normalize_dot_command(update.message.text)
     if not cmd:
         return
+
+    if await bot_can_delete(update.effective_chat.id, context):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
     context.args = args
+
     mapping = {
         "ban": ban, "tban": tban, "unban": unban, "kick": kick,
         "mute": mute, "tmute": tmute, "unmute": unmute,
@@ -977,9 +1038,13 @@ async def dot_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         "filter": add_filter, "stop": stop_filter, "filters": filters_cmd,
         "lock": lock_cmd, "unlock": unlock_cmd,
     }
+
     func = mapping.get(cmd)
     if func:
         await func(update, context)
+    else:
+        msg = await context.bot.send_message(update.effective_chat.id, "Bilinmeyen noktalı komut.")
+        context.application.create_task(delete_later(msg, 5))
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat or not update.effective_user:
@@ -1026,7 +1091,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or update.message.caption or "").strip()
     lowered = text.lower()
 
-    # Notes shortcut #note
     if text.startswith("#") and len(text) > 1:
         name = text[1:].split()[0].lower()
         cursor.execute("SELECT note_text FROM notes WHERE chat_id = ? AND note_name = ?", (cid, name))
@@ -1034,7 +1098,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if row:
             return await update.message.reply_text(row[0])
 
-    # Filters
     if lowered:
         cursor.execute("SELECT trigger_text, reply_text FROM filters_table WHERE chat_id = ?", (cid,))
         for trig, rep in cursor.fetchall():
