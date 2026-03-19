@@ -39,13 +39,23 @@ MAX_NOTE_TEXT = 3000
 MAX_FILTER_TRIGGER = 64
 MAX_FILTER_REPLY = 3000
 
+REPEAT_WINDOW = 120
+REPEAT_LIMIT = 5
+AUTO_MUTE_MINUTES = 30
+
+SEARCH_COOLDOWN = 15
+CALLBACK_COOLDOWN = 1.5
+
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO
 )
-logger = logging.getLogger("kgb_rose_plus")
+logger = logging.getLogger("kgb_rose_plus_stage1")
 
-conn = sqlite3.connect("bot_database.db", check_same_thread=False)
+conn = sqlite3.connect("bot_database.db", check_same_thread=False, timeout=30)
+conn.execute("PRAGMA journal_mode=WAL;")
+conn.execute("PRAGMA synchronous=NORMAL;")
+conn.execute("PRAGMA foreign_keys=ON;")
 cursor = conn.cursor()
 
 cursor.executescript("""
@@ -59,7 +69,7 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     log_chat_id INTEGER DEFAULT 0,
     rules_text TEXT DEFAULT 'Henüz kurallar ayarlanmadı.',
     lock_link INTEGER DEFAULT 0,
-    lock_badword INTEGER DEFAULT 0,
+    lock_badword INTEGER DEFAULT 1,
     lock_flood INTEGER DEFAULT 1
 );
 
@@ -105,10 +115,30 @@ CREATE TABLE IF NOT EXISTS mod_stats (
     total_warns INTEGER DEFAULT 0,
     total_deleted INTEGER DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS punish_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER,
+    user_id INTEGER,
+    action TEXT,
+    reason TEXT,
+    actor_id INTEGER,
+    ts INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS strikes (
+    chat_id INTEGER,
+    user_id INTEGER,
+    strike_count INTEGER DEFAULT 0,
+    UNIQUE(chat_id, user_id)
+);
 """)
 conn.commit()
 
 spam_tracker = defaultdict(list)
+repeat_tracker = defaultdict(list)
+search_cooldowns = {}
+callback_cooldowns = {}
 
 URL_PATTERN = re.compile(
     r"(?i)\b(?:https?://|www\.|t\.me/|telegram\.me/|discord\.gg/|discord\.com/invite/|[a-z0-9-]+\.(com|net|org|gg|me|io|xyz)\S*)"
@@ -153,6 +183,34 @@ def normalize_dot_command(text: str):
         return None, []
     return parts[0].lower(), parts[1:]
 
+def normalize_message_for_repeat(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+def add_punish_history(chat_id: int, user_id: int, action: str, reason: str, actor_id: int):
+    cursor.execute("""
+        INSERT INTO punish_history (chat_id, user_id, action, reason, actor_id, ts)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (chat_id, user_id, action, reason, actor_id, int(time.time())))
+    conn.commit()
+
+def get_strike_count(chat_id: int, user_id: int) -> int:
+    cursor.execute("SELECT strike_count FROM strikes WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    row = cursor.fetchone()
+    return row[0] if row else 0
+
+def inc_strike(chat_id: int, user_id: int) -> int:
+    current = get_strike_count(chat_id, user_id) + 1
+    cursor.execute("""
+        INSERT OR REPLACE INTO strikes (chat_id, user_id, strike_count)
+        VALUES (?, ?, ?)
+    """, (chat_id, user_id, current))
+    conn.commit()
+    return current
+
+def clear_strikes(chat_id: int, user_id: int):
+    cursor.execute("DELETE FROM strikes WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    conn.commit()
+
 async def get_member_status(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
     try:
         return await context.bot.get_chat_member(chat_id, user_id)
@@ -162,6 +220,10 @@ async def get_member_status(chat_id: int, user_id: int, context: ContextTypes.DE
 async def is_admin_user(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     member = await get_member_status(chat_id, user_id, context)
     return bool(member and member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER))
+
+async def is_owner(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    member = await get_member_status(chat_id, user_id, context)
+    return bool(member and member.status == ChatMemberStatus.OWNER)
 
 async def require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if is_private(update):
@@ -233,6 +295,95 @@ def inc_user_deleted(chat_id: int, user_id: int):
     """, (chat_id, user_id))
     conn.commit()
 
+async def auto_mute_user(chat_id: int, user, context: ContextTypes.DEFAULT_TYPE, reason: str):
+    if not await bot_can_restrict(chat_id, context):
+        return False
+    until_date = datetime.datetime.now() + datetime.timedelta(minutes=AUTO_MUTE_MINUTES)
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id,
+            user.id,
+            ChatPermissions(
+                can_send_messages=False,
+                can_send_polls=False,
+                can_add_web_page_previews=False,
+                can_invite_users=False
+            ),
+            until_date=until_date
+        )
+        inc_mod_stat(chat_id, "total_mutes")
+        add_punish_history(chat_id, user.id, "AUTO_MUTE", reason, 0)
+        await send_log(
+            context,
+            chat_id,
+            f"<b>Eylem:</b> AUTO MUTE\n"
+            f"<b>Hedef:</b> {html.escape(user.full_name)} (<code>{user.id}</code>)\n"
+            f"<b>Süre:</b> {AUTO_MUTE_MINUTES} dakika\n"
+            f"<b>Neden:</b> {html.escape(reason)}"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"auto mute hatası: {e}")
+        return False
+
+async def apply_escalation(chat_id: int, target, actor_id: int, context: ContextTypes.DEFAULT_TYPE, base_reason: str):
+    strike = inc_strike(chat_id, target.id)
+
+    if strike == 1:
+        cursor.execute("SELECT warn_count FROM warns WHERE chat_id = ? AND user_id = ?", (chat_id, target.id))
+        row = cursor.fetchone()
+        current_warns = (row[0] if row else 0) + 1
+        cursor.execute("INSERT OR REPLACE INTO warns (chat_id, user_id, warn_count) VALUES (?, ?, ?)", (chat_id, target.id, current_warns))
+        conn.commit()
+        inc_mod_stat(chat_id, "total_warns")
+        add_punish_history(chat_id, target.id, "WARN", base_reason, actor_id)
+        return f"⚠️ Strike {strike}: warn verildi. ({current_warns}/{MAX_WARNS})"
+
+    elif strike == 2:
+        if not await bot_can_restrict(chat_id, context):
+            return "Strike arttı ama mute yetkim yok."
+        until_date = datetime.datetime.now() + datetime.timedelta(minutes=30)
+        await context.bot.restrict_chat_member(
+            chat_id, target.id,
+            ChatPermissions(
+                can_send_messages=False,
+                can_send_polls=False,
+                can_add_web_page_previews=False,
+                can_invite_users=False
+            ),
+            until_date=until_date
+        )
+        inc_mod_stat(chat_id, "total_mutes")
+        add_punish_history(chat_id, target.id, "MUTE_30M", base_reason, actor_id)
+        return "⚠️ Strike 2: 30 dakika susturuldu."
+
+    elif strike == 3:
+        if not await bot_can_restrict(chat_id, context):
+            return "Strike arttı ama mute yetkim yok."
+        until_date = datetime.datetime.now() + datetime.timedelta(days=1)
+        await context.bot.restrict_chat_member(
+            chat_id, target.id,
+            ChatPermissions(
+                can_send_messages=False,
+                can_send_polls=False,
+                can_add_web_page_previews=False,
+                can_invite_users=False
+            ),
+            until_date=until_date
+        )
+        inc_mod_stat(chat_id, "total_mutes")
+        add_punish_history(chat_id, target.id, "MUTE_1D", base_reason, actor_id)
+        return "⚠️ Strike 3: 1 gün susturuldu."
+
+    else:
+        if not await bot_can_restrict(chat_id, context):
+            return "Strike arttı ama ban yetkim yok."
+        await context.bot.ban_chat_member(chat_id, target.id)
+        inc_mod_stat(chat_id, "total_bans")
+        add_punish_history(chat_id, target.id, "BAN", base_reason, actor_id)
+        clear_strikes(chat_id, target.id)
+        return "🚫 Strike limiti doldu: kullanıcı banlandı."
+
 def main_menu_markup():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Beni Gruba Ekle", url=f"https://t.me/{BOT_USERNAME_TEXT.replace('@', '')}?startgroup=true")],
@@ -266,6 +417,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
+    key = (q.from_user.id, q.message.chat_id if q.message else 0)
+    now = time.time()
+    last = callback_cooldowns.get(key, 0)
+    if now - last < CALLBACK_COOLDOWN:
+        return await q.answer("Yavaş.", show_alert=False)
+    callback_cooldowns[key] = now
+
     await q.answer()
     data = q.data
 
@@ -426,6 +584,13 @@ async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ara(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Kullanım: /ara <sorgu>")
+
+    key = (update.effective_chat.id, update.effective_user.id)
+    now = time.time()
+    if now - search_cooldowns.get(key, 0) < SEARCH_COOLDOWN:
+        return await update.message.reply_text("Arama yapmak için biraz bekle.")
+    search_cooldowns[key] = now
+
     query = " ".join(context.args)
     msg = await update.message.reply_text("🔍 Aranıyor...")
     try:
@@ -496,6 +661,7 @@ async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action:
             await context.bot.ban_chat_member(cid, target.id, until_date=until_date)
             act_text = "banlandı" if action == "ban" else f"{context.args[0]} süreyle banlandı"
             inc_mod_stat(cid, "total_bans")
+            add_punish_history(cid, target.id, action.upper(), reason, actor.id)
         elif action in ("mute", "tmute"):
             if not await bot_can_restrict(cid, context):
                 return await update.message.reply_text("Botun susturma yetkisi yok.")
@@ -512,12 +678,14 @@ async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action:
             )
             act_text = "susturuldu" if action == "mute" else f"{context.args[0]} süreyle susturuldu"
             inc_mod_stat(cid, "total_mutes")
+            add_punish_history(cid, target.id, action.upper(), reason, actor.id)
         elif action == "kick":
             if not await bot_can_restrict(cid, context):
                 return await update.message.reply_text("Botun atma yetkisi yok.")
             await context.bot.ban_chat_member(cid, target.id)
             await context.bot.unban_chat_member(cid, target.id)
             act_text = "gruptan atıldı"
+            add_punish_history(cid, target.id, "KICK", reason, actor.id)
         else:
             return
 
@@ -556,6 +724,7 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.message.reply_to_message.from_user
     try:
         await context.bot.unban_chat_member(cid, target.id)
+        add_punish_history(cid, target.id, "UNBAN", "Manual unban", update.effective_user.id)
         msg = await update.message.reply_text(f"✅ {target.full_name} için ban kaldırıldı.")
         context.application.create_task(delete_later(msg, 5))
         await send_log(context, cid, f"<b>Eylem:</b> UNBAN\n<b>Hedef:</b> {html.escape(target.full_name)}")
@@ -574,6 +743,7 @@ async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.message.reply_to_message.from_user
     try:
         await context.bot.restrict_chat_member(cid, target.id, full_unmute_permissions())
+        add_punish_history(cid, target.id, "UNMUTE", "Manual unmute", update.effective_user.id)
         msg = await update.message.reply_text(f"🔊 {target.full_name} için susturma kaldırıldı.")
         context.application.create_task(delete_later(msg, 5))
         await send_log(context, cid, f"<b>Eylem:</b> UNMUTE\n<b>Hedef:</b> {html.escape(target.full_name)}")
@@ -583,23 +753,34 @@ async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
-    actor_member = await get_member_status(update.effective_chat.id, update.effective_user.id, context)
+
+    cid = update.effective_chat.id
+    uid = update.effective_user.id
+    actor_member = await get_member_status(cid, uid, context)
     if not actor_member:
         return await update.message.reply_text("Yetki bilgisi alınamadı.")
-    if actor_member.status != ChatMemberStatus.OWNER and not getattr(actor_member, "can_promote_members", False):
+
+    actor_is_owner = await is_owner(cid, uid, context)
+    actor_can_promote = getattr(actor_member, "can_promote_members", False)
+
+    if not actor_is_owner and not actor_can_promote:
         return await update.message.reply_text("Admin vermek için yetkin yok.")
-    if not await bot_can_promote(update.effective_chat.id, context):
+
+    if not await bot_can_promote(cid, context):
         return await update.message.reply_text("Botun admin verme yetkisi yok.")
+
     if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
         return await update.message.reply_text("Bir kullanıcıya yanıt verip /admin kullan.")
+
     target = update.message.reply_to_message.from_user
-    if target.id == update.effective_user.id:
+    if target.id == uid:
         return await update.message.reply_text("Kendine admin veremezsin.")
-    if await is_admin_user(update.effective_chat.id, target.id, context):
+    if await is_admin_user(cid, target.id, context):
         return await update.message.reply_text("Bu kullanıcı zaten yönetici.")
+
     try:
         await context.bot.promote_chat_member(
-            chat_id=update.effective_chat.id,
+            chat_id=cid,
             user_id=target.id,
             can_manage_chat=True,
             can_delete_messages=True,
@@ -612,29 +793,41 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         msg = await update.message.reply_text(f"👑 {target.full_name} admin yapıldı.")
         context.application.create_task(delete_later(msg, 5))
-        await send_log(context, update.effective_chat.id, f"<b>Eylem:</b> ADMIN VER\n<b>Hedef:</b> {html.escape(target.full_name)}")
+        add_punish_history(cid, target.id, "PROMOTE", "Admin verildi", uid)
+        await send_log(context, cid, f"<b>Eylem:</b> ADMIN VER\n<b>Hedef:</b> {html.escape(target.full_name)}")
     except Exception:
         await update.message.reply_text("Kullanıcı admin yapılamadı.")
 
 async def unadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
-    actor_member = await get_member_status(update.effective_chat.id, update.effective_user.id, context)
+
+    cid = update.effective_chat.id
+    uid = update.effective_user.id
+    actor_member = await get_member_status(cid, uid, context)
     if not actor_member:
         return await update.message.reply_text("Yetki bilgisi alınamadı.")
-    if actor_member.status != ChatMemberStatus.OWNER and not getattr(actor_member, "can_promote_members", False):
+
+    actor_is_owner = await is_owner(cid, uid, context)
+    actor_can_promote = getattr(actor_member, "can_promote_members", False)
+
+    if not actor_is_owner and not actor_can_promote:
         return await update.message.reply_text("Admin almak için yetkin yok.")
-    if not await bot_can_promote(update.effective_chat.id, context):
+
+    if not await bot_can_promote(cid, context):
         return await update.message.reply_text("Botun admin alma yetkisi yok.")
+
     if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
         return await update.message.reply_text("Bir kullanıcıya yanıt verip /unadmin kullan.")
+
     target = update.message.reply_to_message.from_user
-    target_member = await get_member_status(update.effective_chat.id, target.id, context)
+    target_member = await get_member_status(cid, target.id, context)
     if not target_member or target_member.status == ChatMemberStatus.OWNER:
         return await update.message.reply_text("Bu kullanıcıdan adminlik alınamaz.")
+
     try:
         await context.bot.promote_chat_member(
-            chat_id=update.effective_chat.id,
+            chat_id=cid,
             user_id=target.id,
             can_manage_chat=False,
             can_delete_messages=False,
@@ -647,7 +840,8 @@ async def unadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         msg = await update.message.reply_text(f"⬇️ {target.full_name} adminlikten alındı.")
         context.application.create_task(delete_later(msg, 5))
-        await send_log(context, update.effective_chat.id, f"<b>Eylem:</b> ADMIN AL\n<b>Hedef:</b> {html.escape(target.full_name)}")
+        add_punish_history(cid, target.id, "DEMOTE", "Adminlik alındı", uid)
+        await send_log(context, cid, f"<b>Eylem:</b> ADMIN AL\n<b>Hedef:</b> {html.escape(target.full_name)}")
     except Exception:
         await update.message.reply_text("Kullanıcının adminliği alınamadı.")
 
@@ -670,6 +864,7 @@ async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("INSERT OR REPLACE INTO warns (chat_id, user_id, warn_count) VALUES (?, ?, ?)", (cid, target.id, current_warns))
     conn.commit()
     inc_mod_stat(cid, "total_warns")
+    add_punish_history(cid, target.id, "WARN", reason, actor.id)
 
     msg = await update.message.reply_text(
         f"⚠️ <b>{html.escape(target.full_name)}</b> warn aldı. ({current_warns}/{MAX_WARNS})\n"
@@ -690,6 +885,7 @@ async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cursor.execute("UPDATE warns SET warn_count = 0 WHERE chat_id = ? AND user_id = ?", (cid, target.id))
             conn.commit()
             inc_mod_stat(cid, "total_bans")
+            add_punish_history(cid, target.id, "AUTO_BAN", "Max warn", actor.id)
             auto = await update.message.reply_text(f"🚫 {target.full_name} max warn nedeniyle banlandı.")
             context.application.create_task(delete_later(auto, 5))
             await send_log(context, cid, f"<b>Eylem:</b> AUTO BAN\n<b>Hedef:</b> {html.escape(target.full_name)}\n<b>Neden:</b> Max warn")
@@ -719,6 +915,46 @@ async def clearwarns(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     msg = await update.message.reply_text(f"🧽 {target.full_name} warnları sıfırlandı.")
     context.application.create_task(delete_later(msg, 5))
+
+async def strikes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_private(update):
+        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
+    if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
+        return await update.message.reply_text("Bir kullanıcıya yanıt verip /strikes kullan.")
+    target = update.message.reply_to_message.from_user
+    count = get_strike_count(update.effective_chat.id, target.id)
+    await update.message.reply_text(f"🎯 {target.full_name} strike sayısı: {count}")
+
+async def clearstrikes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update, context):
+        return
+    if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
+        return await update.message.reply_text("Bir kullanıcıya yanıt verip /clearstrikes kullan.")
+    target = update.message.reply_to_message.from_user
+    clear_strikes(update.effective_chat.id, target.id)
+    await update.message.reply_text(f"✅ {target.full_name} strike kayıtları temizlendi.")
+
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_admin(update, context):
+        return
+    if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
+        return await update.message.reply_text("Bir kullanıcıya yanıt verip /history kullan.")
+    target = update.message.reply_to_message.from_user
+    cid = update.effective_chat.id
+    cursor.execute("""
+        SELECT action, reason, ts FROM punish_history
+        WHERE chat_id = ? AND user_id = ?
+        ORDER BY id DESC LIMIT 10
+    """, (cid, target.id))
+    rows = cursor.fetchall()
+    if not rows:
+        return await update.message.reply_text("Ceza geçmişi yok.")
+    lines = []
+    for action, reason, ts in rows:
+        dt = datetime.datetime.fromtimestamp(ts).strftime("%d.%m %H:%M")
+        lines.append(f"• {dt} - {action} - {reason}")
+    text = "📜 <b>Ceza Geçmişi</b>\n\n" + "\n".join(html.escape(x) for x in lines)
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def toggle_setting(update: Update, context: ContextTypes.DEFAULT_TYPE, field: str, label: str):
     if not await require_admin(update, context):
@@ -760,7 +996,15 @@ async def setgoodbye(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def setlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
+
     cid = update.effective_chat.id
+    uid = update.effective_user.id
+
+    if not await is_owner(cid, uid, context):
+        actor_member = await get_member_status(cid, uid, context)
+        if not actor_member or not getattr(actor_member, "can_promote_members", False):
+            return await update.message.reply_text("Log ayarlamak için owner veya admin verme yetkisine sahip olmalısın.")
+
     ensure_chat_settings(cid)
     target_log_id = cid
     if context.args:
@@ -1026,6 +1270,7 @@ async def dot_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         "ban": ban, "tban": tban, "unban": unban, "kick": kick,
         "mute": mute, "tmute": tmute, "unmute": unmute,
         "warn": warn, "warns": warns_cmd, "clearwarns": clearwarns,
+        "strikes": strikes_cmd, "clearstrikes": clearstrikes_cmd, "history": history_cmd,
         "admin": admin_cmd, "unadmin": unadmin_cmd,
         "antilink": antilink_cmd, "welcome": welcome_cmd, "goodbye": goodbye_cmd,
         "setwelcome": setwelcome, "setgoodbye": setgoodbye,
@@ -1116,6 +1361,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lock_flood = row[3] == 1
 
     delete_reason = None
+    should_auto_mute_repeat = False
 
     if text and (antilink_on or lock_link) and URL_PATTERN.search(text):
         delete_reason = "Link paylaşımı"
@@ -1135,6 +1381,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             delete_reason = "Spam / flood"
             spam_tracker[(cid, uid)].clear()
 
+    if text:
+        normalized = normalize_message_for_repeat(text)
+        now = time.time()
+        key = (cid, uid, normalized)
+        repeat_tracker[key].append(now)
+        repeat_tracker[key] = [t for t in repeat_tracker[key] if now - t < REPEAT_WINDOW]
+        if len(repeat_tracker[key]) >= REPEAT_LIMIT:
+            should_auto_mute_repeat = True
+            repeat_tracker[key].clear()
+
     if delete_reason:
         try:
             if await bot_can_delete(cid, context):
@@ -1147,12 +1403,34 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.application.create_task(delete_later(warn_msg, 5))
                 inc_mod_stat(cid, "total_deleted")
                 inc_user_deleted(cid, uid)
-                await send_log(context, cid,
-                    f"<b>Eylem:</b> AUTO DELETE\n<b>Kullanıcı:</b> {html.escape(update.effective_user.full_name)}\n"
-                    f"<b>Neden:</b> {html.escape(delete_reason)}\n<b>Mesaj:</b> {html.escape(text[:150])}"
+                add_punish_history(cid, uid, "AUTO_DELETE", delete_reason, 0)
+                result = await apply_escalation(cid, update.effective_user, 0, context, delete_reason)
+                if result:
+                    info = await context.bot.send_message(cid, html.escape(result), parse_mode="HTML")
+                    context.application.create_task(delete_later(info, 5))
+                await send_log(
+                    context,
+                    cid,
+                    f"<b>Eylem:</b> AUTO DELETE\n"
+                    f"<b>Kullanıcı:</b> {html.escape(update.effective_user.full_name)}\n"
+                    f"<b>Neden:</b> {html.escape(delete_reason)}\n"
+                    f"<b>Mesaj:</b> {html.escape(text[:150])}"
                 )
         except Exception as e:
             logger.error(f"otomatik silme hatası: {e}")
+
+    if should_auto_mute_repeat:
+        muted = await auto_mute_user(cid, update.effective_user, context, "Aynı mesajı 5 defa tekrar etme")
+        if muted:
+            try:
+                info = await context.bot.send_message(
+                    cid,
+                    f"🔇 {update.effective_user.mention_html()} aynı mesajı 5 kez tekrar ettiği için {AUTO_MUTE_MINUTES} dakika susturuldu.",
+                    parse_mode="HTML"
+                )
+                context.application.create_task(delete_later(info, 5))
+            except Exception:
+                pass
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Update işlenirken hata oluştu", exc_info=context.error)
@@ -1187,6 +1465,9 @@ def main():
     app.add_handler(CommandHandler("warn", warn))
     app.add_handler(CommandHandler("warns", warns_cmd))
     app.add_handler(CommandHandler("clearwarns", clearwarns))
+    app.add_handler(CommandHandler("strikes", strikes_cmd))
+    app.add_handler(CommandHandler("clearstrikes", clearstrikes_cmd))
+    app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("unadmin", unadmin_cmd))
 
