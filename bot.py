@@ -46,11 +46,21 @@ AUTO_MUTE_MINUTES = 30
 SEARCH_COOLDOWN = 15
 CALLBACK_COOLDOWN = 1.5
 
+JOIN_WINDOW = 30
+JOIN_LIMIT = 5
+RAID_MUTE_MINUTES = 30
+
+STICKER_WINDOW = 10
+STICKER_LIMIT = 5
+
+MEDIA_WINDOW = 10
+MEDIA_LIMIT = 5
+
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO
 )
-logger = logging.getLogger("kgb_rose_plus_stage1")
+logger = logging.getLogger("kgb_rose_plus_stage2")
 
 conn = sqlite3.connect("bot_database.db", check_same_thread=False, timeout=30)
 conn.execute("PRAGMA journal_mode=WAL;")
@@ -70,7 +80,9 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     rules_text TEXT DEFAULT 'Henüz kurallar ayarlanmadı.',
     lock_link INTEGER DEFAULT 0,
     lock_badword INTEGER DEFAULT 1,
-    lock_flood INTEGER DEFAULT 1
+    lock_flood INTEGER DEFAULT 1,
+    antispam INTEGER DEFAULT 1,
+    raid_mode INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS badwords (
@@ -139,6 +151,9 @@ spam_tracker = defaultdict(list)
 repeat_tracker = defaultdict(list)
 search_cooldowns = {}
 callback_cooldowns = {}
+join_tracker = defaultdict(list)
+sticker_tracker = defaultdict(list)
+media_tracker = defaultdict(list)
 
 URL_PATTERN = re.compile(
     r"(?i)\b(?:https?://|www\.|t\.me/|telegram\.me/|discord\.gg/|discord\.com/invite/|[a-z0-9-]+\.(com|net|org|gg|me|io|xyz)\S*)"
@@ -295,10 +310,10 @@ def inc_user_deleted(chat_id: int, user_id: int):
     """, (chat_id, user_id))
     conn.commit()
 
-async def auto_mute_user(chat_id: int, user, context: ContextTypes.DEFAULT_TYPE, reason: str):
+async def auto_mute_user(chat_id: int, user, context: ContextTypes.DEFAULT_TYPE, reason: str, minutes: int = AUTO_MUTE_MINUTES):
     if not await bot_can_restrict(chat_id, context):
         return False
-    until_date = datetime.datetime.now() + datetime.timedelta(minutes=AUTO_MUTE_MINUTES)
+    until_date = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
     try:
         await context.bot.restrict_chat_member(
             chat_id,
@@ -318,7 +333,7 @@ async def auto_mute_user(chat_id: int, user, context: ContextTypes.DEFAULT_TYPE,
             chat_id,
             f"<b>Eylem:</b> AUTO MUTE\n"
             f"<b>Hedef:</b> {html.escape(user.full_name)} (<code>{user.id}</code>)\n"
-            f"<b>Süre:</b> {AUTO_MUTE_MINUTES} dakika\n"
+            f"<b>Süre:</b> {minutes} dakika\n"
             f"<b>Neden:</b> {html.escape(reason)}"
         )
         return True
@@ -442,7 +457,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "2. Yönetici yap\n"
             "3. Mesaj silme / yasaklama / kısıtlama / sabitleme / admin verme yetkilerini ver\n"
             "4. Ayarla:\n"
-            "• /setlog\n• /antilink on\n• /welcome on\n• /setwelcome Hoş geldin {first}\n• /setrules Kurallar\n",
+            "• /setlog\n• /antilink on\n• /welcome on\n• /setwelcome Hoş geldin {first}\n• /setrules Kurallar\n"
+            "• /raid on\n• /antispam on",
             reply_markup=back_menu_markup(),
             parse_mode="HTML"
         )
@@ -452,6 +468,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/antilink on/off\n"
             "/welcome on/off\n"
             "/goodbye on/off\n"
+            "/antispam on/off\n"
+            "/raid on/off\n"
+            "/raidmode\n"
             "/setwelcome <mesaj>\n"
             "/setgoodbye <mesaj>\n"
             "/setlog [chat_id]\n"
@@ -468,6 +487,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/ban / .ban\n/tban / .tban\n/unban / .unban\n"
             "/kick / .kick\n/mute / .mute\n/tmute / .tmute\n/unmute / .unmute\n"
             "/warn / .warn\n/warns / .warns\n/clearwarns / .clearwarns\n"
+            "/strikes / .strikes\n/clearstrikes / .clearstrikes\n/history / .history\n"
             "/admin / .admin\n/unadmin / .unadmin\n"
             "/pin / .pin\n/unpin / .unpin\n/purge / .purge",
             reply_markup=help_menu_markup(),
@@ -476,7 +496,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "help_settings":
         return await q.message.edit_text(
             "⚙️ <b>Ayarlar</b>\n\n"
-            "/antilink\n/welcome\n/goodbye\n/setwelcome\n/setgoodbye\n/setlog\n/setrules\n/settings\n/lock\n/unlock\n/addbad\n/delbad\n/badlist",
+            "/antilink\n/welcome\n/goodbye\n/antispam\n/raid\n/raidmode\n"
+            "/setwelcome\n/setgoodbye\n/setlog\n/setrules\n/settings\n/lock\n/unlock\n/addbad\n/delbad\n/badlist",
             reply_markup=help_menu_markup(),
             parse_mode="HTML"
         )
@@ -972,6 +993,20 @@ async def toggle_setting(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
 async def antilink_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await toggle_setting(update, context, "antilink", "Antilink")
 async def welcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await toggle_setting(update, context, "welcome", "Karşılama")
 async def goodbye_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await toggle_setting(update, context, "goodbye", "Çıkış mesajı")
+async def antispam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await toggle_setting(update, context, "antispam", "Anti-spam")
+async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await toggle_setting(update, context, "raid_mode", "Raid modu")
+
+async def raidmode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_private(update):
+        return await update.message.reply_text("Bu komut grupta kullanılmalı.")
+    cid = update.effective_chat.id
+    ensure_chat_settings(cid)
+    cursor.execute("SELECT raid_mode, antispam FROM chat_settings WHERE chat_id = ?", (cid,))
+    row = cursor.fetchone()
+    await update.message.reply_text(
+        f"🛡️ Raid Mode: {'Açık' if row and row[0] else 'Kapalı'}\n"
+        f"⚡ Anti-Spam: {'Açık' if row and row[1] else 'Kapalı'}"
+    )
 
 async def setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context): return
@@ -1040,7 +1075,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_chat_settings(cid)
     cursor.execute("""
         SELECT antilink, welcome, goodbye, welcome_text, goodbye_text, log_chat_id, rules_text,
-               lock_link, lock_badword, lock_flood
+               lock_link, lock_badword, lock_flood, antispam, raid_mode
         FROM chat_settings WHERE chat_id = ?
     """, (cid,))
     row = cursor.fetchone()
@@ -1049,6 +1084,8 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Antilink: {'Açık' if row[0] else 'Kapalı'}\n"
         f"• Welcome: {'Açık' if row[1] else 'Kapalı'}\n"
         f"• Goodbye: {'Açık' if row[2] else 'Kapalı'}\n"
+        f"• Anti-Spam: {'Açık' if row[10] else 'Kapalı'}\n"
+        f"• Raid Mode: {'Açık' if row[11] else 'Kapalı'}\n"
         f"• Log Chat ID: <code>{row[5]}</code>\n"
         f"• Lock Link: {'Açık' if row[7] else 'Kapalı'}\n"
         f"• Lock Badword: {'Açık' if row[8] else 'Kapalı'}\n"
@@ -1273,6 +1310,7 @@ async def dot_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         "strikes": strikes_cmd, "clearstrikes": clearstrikes_cmd, "history": history_cmd,
         "admin": admin_cmd, "unadmin": unadmin_cmd,
         "antilink": antilink_cmd, "welcome": welcome_cmd, "goodbye": goodbye_cmd,
+        "antispam": antispam_cmd, "raid": raid_cmd, "raidmode": raidmode_cmd,
         "setwelcome": setwelcome, "setgoodbye": setgoodbye,
         "setlog": setlog, "setrules": setrules, "settings": settings_cmd,
         "addbad": addbad, "delbad": delbad, "badlist": badlist,
@@ -1290,6 +1328,29 @@ async def dot_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         msg = await context.bot.send_message(update.effective_chat.id, "Bilinmeyen noktalı komut.")
         context.application.create_task(delete_later(msg, 5))
+
+async def handle_new_members_raid(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    now = time.time()
+    join_tracker[chat_id].append(now)
+    join_tracker[chat_id] = [t for t in join_tracker[chat_id] if now - t < JOIN_WINDOW]
+
+    cursor.execute("SELECT raid_mode FROM chat_settings WHERE chat_id = ?", (chat_id,))
+    row = cursor.fetchone()
+    raid_mode = bool(row and row[0] == 1)
+
+    if len(join_tracker[chat_id]) >= JOIN_LIMIT:
+        if not raid_mode:
+            cursor.execute("UPDATE chat_settings SET raid_mode = 1 WHERE chat_id = ?", (chat_id,))
+            conn.commit()
+            await send_log(context, chat_id, f"<b>Eylem:</b> RAID MODE AUTO ON\n<b>Neden:</b> {JOIN_WINDOW} sn içinde {JOIN_LIMIT}+ giriş")
+            try:
+                msg = await context.bot.send_message(chat_id, "🚨 Raid tespit edildi! Raid Mode otomatik açıldı.")
+                context.application.create_task(delete_later(msg, 5))
+            except Exception:
+                pass
+        return True
+
+    return raid_mode
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat or not update.effective_user:
@@ -1312,13 +1373,30 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
 
     if update.message.new_chat_members:
+        raid_now = await handle_new_members_raid(update, context, cid)
+
         cursor.execute("SELECT welcome, welcome_text FROM chat_settings WHERE chat_id = ?", (cid,))
         row = cursor.fetchone()
-        if row and row[0] == 1:
-            for nm in update.message.new_chat_members:
-                if not nm.is_bot:
-                    text = row[1].replace("{first}", nm.first_name or "")
-                    await update.message.reply_text(f"👋 {nm.mention_html()}\n{text}", parse_mode="HTML")
+
+        for nm in update.message.new_chat_members:
+            if nm.is_bot:
+                continue
+
+            if raid_now:
+                muted = await auto_mute_user(cid, nm, context, "Raid mode yeni üye koruması", RAID_MUTE_MINUTES)
+                if muted:
+                    try:
+                        info = await update.message.reply_text(
+                            f"🛡️ {nm.mention_html()} raid modu nedeniyle {RAID_MUTE_MINUTES} dakika kısıtlandı.",
+                            parse_mode="HTML"
+                        )
+                        context.application.create_task(delete_later(info, 5))
+                    except Exception:
+                        pass
+
+            if row and row[0] == 1:
+                text = row[1].replace("{first}", nm.first_name or "")
+                await update.message.reply_text(f"👋 {nm.mention_html()}\n{text}", parse_mode="HTML")
         return
 
     if update.message.left_chat_member:
@@ -1353,15 +1431,22 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_admin_user(cid, uid, context):
         return
 
-    cursor.execute("SELECT antilink, lock_link, lock_badword, lock_flood FROM chat_settings WHERE chat_id = ?", (cid,))
+    cursor.execute("""
+        SELECT antilink, lock_link, lock_badword, lock_flood, antispam, raid_mode
+        FROM chat_settings WHERE chat_id = ?
+    """, (cid,))
     row = cursor.fetchone()
     antilink_on = row[0] == 1
     lock_link = row[1] == 1
     lock_badword = row[2] == 1
     lock_flood = row[3] == 1
+    antispam_on = row[4] == 1
+    raid_mode_on = row[5] == 1
 
     delete_reason = None
     should_auto_mute_repeat = False
+    should_auto_mute_sticker = False
+    should_auto_mute_media = False
 
     if text and (antilink_on or lock_link) and URL_PATTERN.search(text):
         delete_reason = "Link paylaşımı"
@@ -1373,7 +1458,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 delete_reason = "Yasaklı kelime"
                 break
 
-    if not delete_reason and lock_flood:
+    if not delete_reason and lock_flood and antispam_on:
         now = time.time()
         spam_tracker[(cid, uid)].append(now)
         spam_tracker[(cid, uid)] = [t for t in spam_tracker[(cid, uid)] if now - t < SPAM_WINDOW]
@@ -1381,7 +1466,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             delete_reason = "Spam / flood"
             spam_tracker[(cid, uid)].clear()
 
-    if text:
+    if text and antispam_on:
         normalized = normalize_message_for_repeat(text)
         now = time.time()
         key = (cid, uid, normalized)
@@ -1390,6 +1475,27 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(repeat_tracker[key]) >= REPEAT_LIMIT:
             should_auto_mute_repeat = True
             repeat_tracker[key].clear()
+
+    if antispam_on and update.message.sticker:
+        now = time.time()
+        sticker_tracker[(cid, uid)].append(now)
+        sticker_tracker[(cid, uid)] = [t for t in sticker_tracker[(cid, uid)] if now - t < STICKER_WINDOW]
+        if len(sticker_tracker[(cid, uid)]) >= STICKER_LIMIT:
+            should_auto_mute_sticker = True
+            sticker_tracker[(cid, uid)].clear()
+
+    if antispam_on and (update.message.photo or update.message.video or update.message.document or update.message.animation or update.message.voice):
+        now = time.time()
+        media_tracker[(cid, uid)].append(now)
+        media_tracker[(cid, uid)] = [t for t in media_tracker[(cid, uid)] if now - t < MEDIA_WINDOW]
+        if len(media_tracker[(cid, uid)]) >= MEDIA_LIMIT:
+            should_auto_mute_media = True
+            media_tracker[(cid, uid)].clear()
+
+    if raid_mode_on and not delete_reason and text:
+        # raid mod açıkken text mesajlar da escalation'a daha hızlı girsin
+        if len(text) > 0:
+            delete_reason = "Raid mode aktif"
 
     if delete_reason:
         try:
@@ -1420,12 +1526,38 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"otomatik silme hatası: {e}")
 
     if should_auto_mute_repeat:
-        muted = await auto_mute_user(cid, update.effective_user, context, "Aynı mesajı 5 defa tekrar etme")
+        muted = await auto_mute_user(cid, update.effective_user, context, "Aynı mesajı 5 defa tekrar etme", AUTO_MUTE_MINUTES)
         if muted:
             try:
                 info = await context.bot.send_message(
                     cid,
                     f"🔇 {update.effective_user.mention_html()} aynı mesajı 5 kez tekrar ettiği için {AUTO_MUTE_MINUTES} dakika susturuldu.",
+                    parse_mode="HTML"
+                )
+                context.application.create_task(delete_later(info, 5))
+            except Exception:
+                pass
+
+    if should_auto_mute_sticker:
+        muted = await auto_mute_user(cid, update.effective_user, context, "Sticker spam", AUTO_MUTE_MINUTES)
+        if muted:
+            try:
+                info = await context.bot.send_message(
+                    cid,
+                    f"🧩 {update.effective_user.mention_html()} sticker spam nedeniyle {AUTO_MUTE_MINUTES} dakika susturuldu.",
+                    parse_mode="HTML"
+                )
+                context.application.create_task(delete_later(info, 5))
+            except Exception:
+                pass
+
+    if should_auto_mute_media:
+        muted = await auto_mute_user(cid, update.effective_user, context, "Medya spam", AUTO_MUTE_MINUTES)
+        if muted:
+            try:
+                info = await context.bot.send_message(
+                    cid,
+                    f"📦 {update.effective_user.mention_html()} medya spam nedeniyle {AUTO_MUTE_MINUTES} dakika susturuldu.",
                     parse_mode="HTML"
                 )
                 context.application.create_task(delete_later(info, 5))
@@ -1474,6 +1606,9 @@ def main():
     app.add_handler(CommandHandler("antilink", antilink_cmd))
     app.add_handler(CommandHandler("welcome", welcome_cmd))
     app.add_handler(CommandHandler("goodbye", goodbye_cmd))
+    app.add_handler(CommandHandler("antispam", antispam_cmd))
+    app.add_handler(CommandHandler("raid", raid_cmd))
+    app.add_handler(CommandHandler("raidmode", raidmode_cmd))
     app.add_handler(CommandHandler("setwelcome", setwelcome))
     app.add_handler(CommandHandler("setgoodbye", setgoodbye))
     app.add_handler(CommandHandler("setlog", setlog))
