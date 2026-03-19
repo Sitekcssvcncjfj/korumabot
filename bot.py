@@ -6,6 +6,7 @@ import asyncio
 import logging
 import sqlite3
 import datetime
+import unicodedata
 from collections import defaultdict
 
 from telegram import (
@@ -60,7 +61,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO
 )
-logger = logging.getLogger("kgb_rose_plus_stage2")
+logger = logging.getLogger("kgb_rose_plus_stage3")
 
 conn = sqlite3.connect("bot_database.db", check_same_thread=False, timeout=30)
 conn.execute("PRAGMA journal_mode=WAL;")
@@ -144,6 +145,10 @@ CREATE TABLE IF NOT EXISTS strikes (
     strike_count INTEGER DEFAULT 0,
     UNIQUE(chat_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS sudo_users (
+    user_id INTEGER PRIMARY KEY
+);
 """)
 conn.commit()
 
@@ -156,7 +161,7 @@ sticker_tracker = defaultdict(list)
 media_tracker = defaultdict(list)
 
 URL_PATTERN = re.compile(
-    r"(?i)\b(?:https?://|www\.|t\.me/|telegram\.me/|discord\.gg/|discord\.com/invite/|[a-z0-9-]+\.(com|net|org|gg|me|io|xyz)\S*)"
+    r"(?i)\b(?:https?://|www\.|t\.me/|telegram\.me/|discord\.gg/|discord\.com/invite/|telegram\.dog/|[a-z0-9-]+\.(com|net|org|gg|me|io|xyz|ru|co)\S*)"
 )
 
 def is_private(update: Update) -> bool:
@@ -201,6 +206,39 @@ def normalize_dot_command(text: str):
 def normalize_message_for_repeat(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
+def normalize_text_strong(text: str) -> str:
+    text = text.lower()
+    text = text.replace("hxxp", "http")
+    text = text.replace("[.]", ".")
+    text = text.replace("(.)", ".")
+    text = text.replace(" dot ", ".")
+    text = text.replace(" d0t ", ".")
+    text = text.replace(" t me ", " t.me ")
+    text = text.replace("telegram dot me", "telegram.me")
+    text = text.replace("discord dot gg", "discord.gg")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+
+    tr_map = str.maketrans({
+        "ç": "c", "ğ": "g", "ı": "i", "ö": "o", "ş": "s", "ü": "u",
+        "@": "a", "$": "s", "€": "e", "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t"
+    })
+    text = text.translate(tr_map)
+    text = re.sub(r"[^\w\s./:-]", "", text)
+    text = re.sub(r"(.)\1{2,}", r"\1", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+def normalize_badword_word(word: str) -> str:
+    return normalize_text_strong(word).replace(" ", "")
+
+def normalize_link_text(text: str) -> str:
+    text = normalize_text_strong(text)
+    text = text.replace(" / ", "/").replace(" . ", ".")
+    text = re.sub(r"\s*\.\s*", ".", text)
+    text = re.sub(r"\s*/\s*", "/", text)
+    return text
+
 def add_punish_history(chat_id: int, user_id: int, action: str, reason: str, actor_id: int):
     cursor.execute("""
         INSERT INTO punish_history (chat_id, user_id, action, reason, actor_id, ts)
@@ -226,6 +264,10 @@ def clear_strikes(chat_id: int, user_id: int):
     cursor.execute("DELETE FROM strikes WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
     conn.commit()
 
+def is_sudo_id(user_id: int) -> bool:
+    cursor.execute("SELECT 1 FROM sudo_users WHERE user_id = ?", (user_id,))
+    return cursor.fetchone() is not None
+
 async def get_member_status(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
     try:
         return await context.bot.get_chat_member(chat_id, user_id)
@@ -233,6 +275,8 @@ async def get_member_status(chat_id: int, user_id: int, context: ContextTypes.DE
         return None
 
 async def is_admin_user(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if is_sudo_id(user_id):
+        return True
     member = await get_member_status(chat_id, user_id, context)
     return bool(member and member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER))
 
@@ -240,14 +284,39 @@ async def is_owner(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYP
     member = await get_member_status(chat_id, user_id, context)
     return bool(member and member.status == ChatMemberStatus.OWNER)
 
+async def role_of(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
+    if await is_owner(chat_id, user_id, context):
+        return "owner"
+    if is_sudo_id(user_id):
+        return "sudo"
+    if await is_admin_user(chat_id, user_id, context):
+        return "admin"
+    return "member"
+
+# Permission Matrix
+# owner > sudo > admin > member
+PERMS = {
+    "view_basic": {"owner", "sudo", "admin", "member"},
+    "mod_basic": {"owner", "sudo", "admin"},
+    "settings_basic": {"owner", "sudo", "admin"},
+    "promote": {"owner", "sudo"},
+    "setlog": {"owner", "sudo"},
+    "sudo_manage": {"owner"},
+    "history_view": {"owner", "sudo", "admin"},
+}
+
+async def has_perm(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE, perm: str) -> bool:
+    role = await role_of(chat_id, user_id, context)
+    return role in PERMS.get(perm, set())
+
 async def require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if is_private(update):
         if update.message:
             await update.message.reply_text("Bu komut grupta kullanılmalı.")
         return False
-    ok = await is_admin_user(update.effective_chat.id, update.effective_user.id, context)
+    ok = await has_perm(update.effective_chat.id, update.effective_user.id, context, "mod_basic")
     if not ok and update.message:
-        await update.message.reply_text("Bu komutu sadece grup yöneticileri kullanabilir.")
+        await update.message.reply_text("Bu komutu kullanamazsın.")
     return ok
 
 async def bot_rights(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
@@ -423,7 +492,7 @@ def help_menu_markup():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"👋 Merhaba!\n"
-        f"{BOT_USERNAME_TEXT} gruplarınızı kolay ve güvenle yönetmenize yardımcı olması için gelişmiş bir moderasyon botudur.\n\n"
+        f"{BOT_USERNAME_TEXT} gelişmiş grup koruma, anti-raid ve moderasyon botudur.\n\n"
         "👉 Beni gruba ekleyin ve yönetici yapın.\n"
         "👉 Komutları hem / hem . ile kullanabilirsiniz."
     )
@@ -456,7 +525,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "1. Botu gruba ekle\n"
             "2. Yönetici yap\n"
             "3. Mesaj silme / yasaklama / kısıtlama / sabitleme / admin verme yetkilerini ver\n"
-            "4. Ayarla:\n"
+            "4. İsteğe bağlı owner tarafından sudo ekle\n"
+            "5. Ayarla:\n"
             "• /setlog\n• /antilink on\n• /welcome on\n• /setwelcome Hoş geldin {first}\n• /setrules Kurallar\n"
             "• /raid on\n• /antispam on",
             reply_markup=back_menu_markup(),
@@ -488,8 +558,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/kick / .kick\n/mute / .mute\n/tmute / .tmute\n/unmute / .unmute\n"
             "/warn / .warn\n/warns / .warns\n/clearwarns / .clearwarns\n"
             "/strikes / .strikes\n/clearstrikes / .clearstrikes\n/history / .history\n"
-            "/admin / .admin\n/unadmin / .unadmin\n"
-            "/pin / .pin\n/unpin / .unpin\n/purge / .purge",
+            "/admin / .admin\n/unadmin / .unadmin",
             reply_markup=help_menu_markup(),
             parse_mode="HTML"
         )
@@ -497,7 +566,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await q.message.edit_text(
             "⚙️ <b>Ayarlar</b>\n\n"
             "/antilink\n/welcome\n/goodbye\n/antispam\n/raid\n/raidmode\n"
-            "/setwelcome\n/setgoodbye\n/setlog\n/setrules\n/settings\n/lock\n/unlock\n/addbad\n/delbad\n/badlist",
+            "/setwelcome\n/setgoodbye\n/setlog\n/setrules\n/settings\n/lock\n/unlock\n/addbad\n/delbad\n/badlist\n"
+            "/addsudo\n/delsudo\n/sudolist",
             reply_markup=help_menu_markup(),
             parse_mode="HTML"
         )
@@ -530,7 +600,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def yardim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text(
-            "🔧 Botu gruba ekle, yönetici yap, gerekli yetkileri ver. Komutları / veya . ile kullan.",
+            "🔧 Botu gruba ekle, yönetici yap, gerekli yetkileri ver. Owner isterse sudo ekleyebilir. Komutlar / veya . ile çalışır.",
             parse_mode="HTML"
         )
 
@@ -556,12 +626,14 @@ async def userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.effective_user
     if update.message.reply_to_message and update.message.reply_to_message.from_user:
         target = update.message.reply_to_message.from_user
+    role = await role_of(update.effective_chat.id, target.id, context) if update.effective_chat else "member"
     text = (
         f"👤 <b>Kullanıcı Bilgisi</b>\n\n"
         f"• ID: <code>{target.id}</code>\n"
         f"• Ad: {html.escape(target.full_name)}\n"
         f"• Username: @{target.username if target.username else 'yok'}\n"
-        f"• Bot: {'Evet' if target.is_bot else 'Hayır'}"
+        f"• Bot: {'Evet' if target.is_bot else 'Hayır'}\n"
+        f"• Rol: {role}"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -638,15 +710,21 @@ async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action:
     if not await require_admin(update, context):
         return
 
-    actor_member = await get_member_status(update.effective_chat.id, update.effective_user.id, context)
-    if not actor_member:
-        return await update.message.reply_text("Yetki bilgisi alınamadı.")
-    if actor_member.status != ChatMemberStatus.OWNER and not getattr(actor_member, "can_restrict_members", False):
+    cid = update.effective_chat.id
+    uid = update.effective_user.id
+    role = await role_of(cid, uid, context)
+    actor_member = await get_member_status(cid, uid, context)
+
+    if role not in ("owner", "sudo", "admin"):
         return await update.message.reply_text("Bu işlem için yetkin yok.")
+
+    if role == "admin":
+        if not actor_member or (actor_member.status != ChatMemberStatus.OWNER and not getattr(actor_member, "can_restrict_members", False)):
+            return await update.message.reply_text("Bu işlem için Telegram admin yetkin yok.")
+
     if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
         return await update.message.reply_text(f"Bir kullanıcı mesajına yanıt vererek /{action} kullan.")
 
-    cid = update.effective_chat.id
     actor = update.effective_user
     target = update.message.reply_to_message.from_user
 
@@ -655,8 +733,10 @@ async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action:
     me = await context.bot.get_me()
     if target.id == me.id:
         return await update.message.reply_text("Bana işlem yapamazsın.")
-    if await is_admin_user(cid, target.id, context):
-        return await update.message.reply_text("Yöneticilere işlem yapamam.")
+
+    target_role = await role_of(cid, target.id, context)
+    if target_role in ("owner", "sudo", "admin"):
+        return await update.message.reply_text("Yetkili kullanıcılara işlem yapamam.")
 
     reason = "Sebep belirtilmedi."
     duration_secs = None
@@ -682,7 +762,7 @@ async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action:
             await context.bot.ban_chat_member(cid, target.id, until_date=until_date)
             act_text = "banlandı" if action == "ban" else f"{context.args[0]} süreyle banlandı"
             inc_mod_stat(cid, "total_bans")
-            add_punish_history(cid, target.id, action.upper(), reason, actor.id)
+            add_punish_history(cid, target.id, action.upper(), reason, uid)
         elif action in ("mute", "tmute"):
             if not await bot_can_restrict(cid, context):
                 return await update.message.reply_text("Botun susturma yetkisi yok.")
@@ -699,14 +779,14 @@ async def mod_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action:
             )
             act_text = "susturuldu" if action == "mute" else f"{context.args[0]} süreyle susturuldu"
             inc_mod_stat(cid, "total_mutes")
-            add_punish_history(cid, target.id, action.upper(), reason, actor.id)
+            add_punish_history(cid, target.id, action.upper(), reason, uid)
         elif action == "kick":
             if not await bot_can_restrict(cid, context):
                 return await update.message.reply_text("Botun atma yetkisi yok.")
             await context.bot.ban_chat_member(cid, target.id)
             await context.bot.unban_chat_member(cid, target.id)
             act_text = "gruptan atıldı"
-            add_punish_history(cid, target.id, "KICK", reason, actor.id)
+            add_punish_history(cid, target.id, "KICK", reason, uid)
         else:
             return
 
@@ -736,16 +816,23 @@ async def kick(update: Update, context: ContextTypes.DEFAULT_TYPE): await mod_ac
 async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
-    actor_member = await get_member_status(update.effective_chat.id, update.effective_user.id, context)
-    if actor_member.status != ChatMemberStatus.OWNER and not getattr(actor_member, "can_restrict_members", False):
+    cid = update.effective_chat.id
+    uid = update.effective_user.id
+    role = await role_of(cid, uid, context)
+    actor_member = await get_member_status(cid, uid, context)
+
+    if role == "admin":
+        if not actor_member or (actor_member.status != ChatMemberStatus.OWNER and not getattr(actor_member, "can_restrict_members", False)):
+            return await update.message.reply_text("Ban kaldırmak için Telegram yetkin yok.")
+    elif role not in ("owner", "sudo", "admin"):
         return await update.message.reply_text("Ban kaldırmak için yetkin yok.")
+
     if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
         return await update.message.reply_text("Bir kullanıcı mesajına yanıt verip /unban kullan.")
-    cid = update.effective_chat.id
     target = update.message.reply_to_message.from_user
     try:
         await context.bot.unban_chat_member(cid, target.id)
-        add_punish_history(cid, target.id, "UNBAN", "Manual unban", update.effective_user.id)
+        add_punish_history(cid, target.id, "UNBAN", "Manual unban", uid)
         msg = await update.message.reply_text(f"✅ {target.full_name} için ban kaldırıldı.")
         context.application.create_task(delete_later(msg, 5))
         await send_log(context, cid, f"<b>Eylem:</b> UNBAN\n<b>Hedef:</b> {html.escape(target.full_name)}")
@@ -755,16 +842,23 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_admin(update, context):
         return
-    actor_member = await get_member_status(update.effective_chat.id, update.effective_user.id, context)
-    if actor_member.status != ChatMemberStatus.OWNER and not getattr(actor_member, "can_restrict_members", False):
+    cid = update.effective_chat.id
+    uid = update.effective_user.id
+    role = await role_of(cid, uid, context)
+    actor_member = await get_member_status(cid, uid, context)
+
+    if role == "admin":
+        if not actor_member or (actor_member.status != ChatMemberStatus.OWNER and not getattr(actor_member, "can_restrict_members", False)):
+            return await update.message.reply_text("Susturma kaldırmak için Telegram yetkin yok.")
+    elif role not in ("owner", "sudo", "admin"):
         return await update.message.reply_text("Susturma kaldırmak için yetkin yok.")
+
     if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
         return await update.message.reply_text("Bir kullanıcı mesajına yanıt verip /unmute kullan.")
-    cid = update.effective_chat.id
     target = update.message.reply_to_message.from_user
     try:
         await context.bot.restrict_chat_member(cid, target.id, full_unmute_permissions())
-        add_punish_history(cid, target.id, "UNMUTE", "Manual unmute", update.effective_user.id)
+        add_punish_history(cid, target.id, "UNMUTE", "Manual unmute", uid)
         msg = await update.message.reply_text(f"🔊 {target.full_name} için susturma kaldırıldı.")
         context.application.create_task(delete_later(msg, 5))
         await send_log(context, cid, f"<b>Eylem:</b> UNMUTE\n<b>Hedef:</b> {html.escape(target.full_name)}")
@@ -777,15 +871,15 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cid = update.effective_chat.id
     uid = update.effective_user.id
+    role = await role_of(cid, uid, context)
     actor_member = await get_member_status(cid, uid, context)
-    if not actor_member:
-        return await update.message.reply_text("Yetki bilgisi alınamadı.")
 
-    actor_is_owner = await is_owner(cid, uid, context)
-    actor_can_promote = getattr(actor_member, "can_promote_members", False)
-
-    if not actor_is_owner and not actor_can_promote:
+    if role not in ("owner", "sudo"):
         return await update.message.reply_text("Admin vermek için yetkin yok.")
+
+    if role == "sudo":
+        if not actor_member or not getattr(actor_member, "can_promote_members", False):
+            return await update.message.reply_text("Sudo olsan da bu grupta promote yetkin yok.")
 
     if not await bot_can_promote(cid, context):
         return await update.message.reply_text("Botun admin verme yetkisi yok.")
@@ -796,8 +890,10 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.message.reply_to_message.from_user
     if target.id == uid:
         return await update.message.reply_text("Kendine admin veremezsin.")
-    if await is_admin_user(cid, target.id, context):
-        return await update.message.reply_text("Bu kullanıcı zaten yönetici.")
+
+    target_role = await role_of(cid, target.id, context)
+    if target_role in ("owner", "sudo", "admin"):
+        return await update.message.reply_text("Bu kullanıcı zaten yetkili.")
 
     try:
         await context.bot.promote_chat_member(
@@ -825,15 +921,15 @@ async def unadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cid = update.effective_chat.id
     uid = update.effective_user.id
+    role = await role_of(cid, uid, context)
     actor_member = await get_member_status(cid, uid, context)
-    if not actor_member:
-        return await update.message.reply_text("Yetki bilgisi alınamadı.")
 
-    actor_is_owner = await is_owner(cid, uid, context)
-    actor_can_promote = getattr(actor_member, "can_promote_members", False)
-
-    if not actor_is_owner and not actor_can_promote:
+    if role not in ("owner", "sudo"):
         return await update.message.reply_text("Admin almak için yetkin yok.")
+
+    if role == "sudo":
+        if not actor_member or not getattr(actor_member, "can_promote_members", False):
+            return await update.message.reply_text("Sudo olsan da bu grupta promote yetkin yok.")
 
     if not await bot_can_promote(cid, context):
         return await update.message.reply_text("Botun admin alma yetkisi yok.")
@@ -843,8 +939,14 @@ async def unadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target = update.message.reply_to_message.from_user
     target_member = await get_member_status(cid, target.id, context)
-    if not target_member or target_member.status == ChatMemberStatus.OWNER:
-        return await update.message.reply_text("Bu kullanıcıdan adminlik alınamaz.")
+    target_role = await role_of(cid, target.id, context)
+
+    if target_role == "owner":
+        return await update.message.reply_text("Owner'dan adminlik alınamaz.")
+    if target_role == "sudo":
+        return await update.message.reply_text("Sudo kullanıcıyı adminlikten alamazsın, önce sudoyu kaldırmalısın.")
+    if not target_member:
+        return await update.message.reply_text("Hedef kullanıcı bulunamadı.")
 
     try:
         await context.bot.promote_chat_member(
@@ -876,8 +978,9 @@ async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.message.reply_to_message.from_user
     reason = " ".join(context.args) if context.args else "Sebep belirtilmedi."
 
-    if await is_admin_user(cid, target.id, context):
-        return await update.message.reply_text("Yöneticilere warn veremem.")
+    target_role = await role_of(cid, target.id, context)
+    if target_role in ("owner", "sudo", "admin"):
+        return await update.message.reply_text("Yetkili kullanıcılara warn veremem.")
 
     cursor.execute("SELECT warn_count FROM warns WHERE chat_id = ? AND user_id = ?", (cid, target.id))
     row = cursor.fetchone()
@@ -956,8 +1059,8 @@ async def clearstrikes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ {target.full_name} strike kayıtları temizlendi.")
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context):
-        return
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "history_view"):
+        return await update.message.reply_text("Bu komut için yetkin yok.")
     if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
         return await update.message.reply_text("Bir kullanıcıya yanıt verip /history kullan.")
     target = update.message.reply_to_message.from_user
@@ -977,9 +1080,39 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "📜 <b>Ceza Geçmişi</b>\n\n" + "\n".join(html.escape(x) for x in lines)
     await update.message.reply_text(text, parse_mode="HTML")
 
+async def addsudo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "sudo_manage"):
+        return await update.message.reply_text("Sadece owner sudo ekleyebilir.")
+    if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
+        return await update.message.reply_text("Bir kullanıcıya yanıt verip /addsudo kullan.")
+    target = update.message.reply_to_message.from_user
+    cursor.execute("INSERT OR IGNORE INTO sudo_users (user_id) VALUES (?)", (target.id,))
+    conn.commit()
+    await update.message.reply_text(f"✅ {target.full_name} sudo olarak eklendi.")
+
+async def delsudo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "sudo_manage"):
+        return await update.message.reply_text("Sadece owner sudo silebilir.")
+    if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
+        return await update.message.reply_text("Bir kullanıcıya yanıt verip /delsudo kullan.")
+    target = update.message.reply_to_message.from_user
+    cursor.execute("DELETE FROM sudo_users WHERE user_id = ?", (target.id,))
+    conn.commit()
+    await update.message.reply_text(f"✅ {target.full_name} sudo listesinden çıkarıldı.")
+
+async def sudolist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "sudo_manage"):
+        return await update.message.reply_text("Sadece owner sudo listesini görebilir.")
+    cursor.execute("SELECT user_id FROM sudo_users ORDER BY user_id")
+    rows = cursor.fetchall()
+    if not rows:
+        return await update.message.reply_text("Sudo listesi boş.")
+    text = "👑 <b>Sudo Listesi</b>\n\n" + "\n".join(f"• <code>{r[0]}</code>" for r in rows)
+    await update.message.reply_text(text, parse_mode="HTML")
+
 async def toggle_setting(update: Update, context: ContextTypes.DEFAULT_TYPE, field: str, label: str):
-    if not await require_admin(update, context):
-        return
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "settings_basic"):
+        return await update.message.reply_text("Bu ayar için yetkin yok.")
     if not context.args or context.args[0].lower() not in ("on", "off"):
         return await update.message.reply_text(f"Kullanım: /{field} on veya /{field} off")
     cid = update.effective_chat.id
@@ -1009,7 +1142,8 @@ async def raidmode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context): return
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "settings_basic"):
+        return await update.message.reply_text("Bu komut için yetkin yok.")
     if not context.args: return await update.message.reply_text("Kullanım: /setwelcome <mesaj>")
     cid = update.effective_chat.id
     ensure_chat_settings(cid)
@@ -1019,7 +1153,8 @@ async def setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(delete_later(msg, 5))
 
 async def setgoodbye(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context): return
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "settings_basic"):
+        return await update.message.reply_text("Bu komut için yetkin yok.")
     if not context.args: return await update.message.reply_text("Kullanım: /setgoodbye <mesaj>")
     cid = update.effective_chat.id
     ensure_chat_settings(cid)
@@ -1029,17 +1164,10 @@ async def setgoodbye(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(delete_later(msg, 5))
 
 async def setlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context):
-        return
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "setlog"):
+        return await update.message.reply_text("Log ayarı için yetkin yok.")
 
     cid = update.effective_chat.id
-    uid = update.effective_user.id
-
-    if not await is_owner(cid, uid, context):
-        actor_member = await get_member_status(cid, uid, context)
-        if not actor_member or not getattr(actor_member, "can_promote_members", False):
-            return await update.message.reply_text("Log ayarlamak için owner veya admin verme yetkisine sahip olmalısın.")
-
     ensure_chat_settings(cid)
     target_log_id = cid
     if context.args:
@@ -1059,7 +1187,8 @@ async def setlog(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(delete_later(msg, 5))
 
 async def setrules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context): return
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "settings_basic"):
+        return await update.message.reply_text("Bu komut için yetkin yok.")
     if not context.args: return await update.message.reply_text("Kullanım: /setrules <kurallar>")
     cid = update.effective_chat.id
     ensure_chat_settings(cid)
@@ -1069,8 +1198,8 @@ async def setrules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(delete_later(msg, 5))
 
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context):
-        return
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "settings_basic"):
+        return await update.message.reply_text("Bu komut için yetkin yok.")
     cid = update.effective_chat.id
     ensure_chat_settings(cid)
     cursor.execute("""
@@ -1096,7 +1225,8 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 async def lock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context): return
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "settings_basic"):
+        return await update.message.reply_text("Bu komut için yetkin yok.")
     if not context.args: return await update.message.reply_text("Kullanım: /lock <link|badword|flood>")
     cid = update.effective_chat.id
     ensure_chat_settings(cid)
@@ -1110,7 +1240,8 @@ async def lock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔒 {arg} kilidi açıldı.")
 
 async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context): return
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "settings_basic"):
+        return await update.message.reply_text("Bu komut için yetkin yok.")
     if not context.args: return await update.message.reply_text("Kullanım: /unlock <link|badword|flood>")
     cid = update.effective_chat.id
     ensure_chat_settings(cid)
@@ -1124,9 +1255,10 @@ async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔓 {arg} kilidi kapatıldı.")
 
 async def addbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context): return
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "settings_basic"):
+        return await update.message.reply_text("Bu komut için yetkin yok.")
     if not context.args: return await update.message.reply_text("Kullanım: /addbad <kelime>")
-    word = context.args[0].lower().strip()
+    word = normalize_badword_word(context.args[0].lower().strip())
     cid = update.effective_chat.id
     cursor.execute("INSERT OR IGNORE INTO badwords (chat_id, word) VALUES (?, ?)", (cid, word))
     conn.commit()
@@ -1134,9 +1266,10 @@ async def addbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(delete_later(msg, 5))
 
 async def delbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context): return
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "settings_basic"):
+        return await update.message.reply_text("Bu komut için yetkin yok.")
     if not context.args: return await update.message.reply_text("Kullanım: /delbad <kelime>")
-    word = context.args[0].lower().strip()
+    word = normalize_badword_word(context.args[0].lower().strip())
     cid = update.effective_chat.id
     cursor.execute("DELETE FROM badwords WHERE chat_id = ? AND word = ?", (cid, word))
     conn.commit()
@@ -1144,8 +1277,8 @@ async def delbad(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(delete_later(msg, 5))
 
 async def badlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_admin(update, context):
-        return
+    if not await has_perm(update.effective_chat.id, update.effective_user.id, context, "settings_basic"):
+        return await update.message.reply_text("Bu komut için yetkin yok.")
     cid = update.effective_chat.id
     cursor.execute("SELECT word FROM badwords WHERE chat_id = ? ORDER BY word ASC", (cid,))
     rows = cursor.fetchall()
@@ -1309,6 +1442,7 @@ async def dot_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         "warn": warn, "warns": warns_cmd, "clearwarns": clearwarns,
         "strikes": strikes_cmd, "clearstrikes": clearstrikes_cmd, "history": history_cmd,
         "admin": admin_cmd, "unadmin": unadmin_cmd,
+        "addsudo": addsudo_cmd, "delsudo": delsudo_cmd, "sudolist": sudolist_cmd,
         "antilink": antilink_cmd, "welcome": welcome_cmd, "goodbye": goodbye_cmd,
         "antispam": antispam_cmd, "raid": raid_cmd, "raidmode": raidmode_cmd,
         "setwelcome": setwelcome, "setgoodbye": setgoodbye,
@@ -1413,6 +1547,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (update.message.text or update.message.caption or "").strip()
     lowered = text.lower()
+    normalized_text = normalize_text_strong(text)
+    normalized_link_text = normalize_link_text(text)
 
     if text.startswith("#") and len(text) > 1:
         name = text[1:].split()[0].lower()
@@ -1448,13 +1584,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     should_auto_mute_sticker = False
     should_auto_mute_media = False
 
-    if text and (antilink_on or lock_link) and URL_PATTERN.search(text):
-        delete_reason = "Link paylaşımı"
+    if text and (antilink_on or lock_link):
+        if URL_PATTERN.search(text) or URL_PATTERN.search(normalized_link_text):
+            delete_reason = "Link paylaşımı"
 
-    if not delete_reason and lowered and lock_badword:
+    if not delete_reason and normalized_text and lock_badword:
         cursor.execute("SELECT word FROM badwords WHERE chat_id = ?", (cid,))
+        compact_text = normalized_text.replace(" ", "")
         for r in cursor.fetchall():
-            if re.search(rf"\b{re.escape(r[0])}\b", lowered, re.IGNORECASE):
+            bw = normalize_badword_word(r[0])
+            if bw and bw in compact_text:
                 delete_reason = "Yasaklı kelime"
                 break
 
@@ -1467,7 +1606,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             spam_tracker[(cid, uid)].clear()
 
     if text and antispam_on:
-        normalized = normalize_message_for_repeat(text)
+        normalized = normalize_message_for_repeat(normalized_text)
         now = time.time()
         key = (cid, uid, normalized)
         repeat_tracker[key].append(now)
@@ -1493,9 +1632,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             media_tracker[(cid, uid)].clear()
 
     if raid_mode_on and not delete_reason and text:
-        # raid mod açıkken text mesajlar da escalation'a daha hızlı girsin
-        if len(text) > 0:
-            delete_reason = "Raid mode aktif"
+        delete_reason = "Raid mode aktif"
 
     if delete_reason:
         try:
@@ -1602,6 +1739,10 @@ def main():
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("unadmin", unadmin_cmd))
+
+    app.add_handler(CommandHandler("addsudo", addsudo_cmd))
+    app.add_handler(CommandHandler("delsudo", delsudo_cmd))
+    app.add_handler(CommandHandler("sudolist", sudolist_cmd))
 
     app.add_handler(CommandHandler("antilink", antilink_cmd))
     app.add_handler(CommandHandler("welcome", welcome_cmd))
