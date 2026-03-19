@@ -27,6 +27,7 @@ from telegram.ext import (
 from duckduckgo_search import DDGS
 
 TOKEN = os.getenv("BOT_TOKEN")
+DB_PATH = os.getenv("DB_PATH", "/data/bot_database.db")
 
 BOT_USERNAME_TEXT = "@KGBKORUMABot"
 SUPPORT_URL = "https://t.me/KGBotomasyon"
@@ -63,7 +64,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("kgb_rose_plus_stage3")
 
-conn = sqlite3.connect("bot_database.db", check_same_thread=False, timeout=30)
+db_dir = os.path.dirname(DB_PATH)
+if db_dir:
+    os.makedirs(db_dir, exist_ok=True)
+
+conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
 conn.execute("PRAGMA journal_mode=WAL;")
 conn.execute("PRAGMA synchronous=NORMAL;")
 conn.execute("PRAGMA foreign_keys=ON;")
@@ -293,8 +298,6 @@ async def role_of(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE
         return "admin"
     return "member"
 
-# Permission Matrix
-# owner > sudo > admin > member
 PERMS = {
     "view_basic": {"owner", "sudo", "admin", "member"},
     "mod_basic": {"owner", "sudo", "admin"},
@@ -1708,6 +1711,8 @@ def main():
     if not TOKEN:
         print("HATA: BOT_TOKEN tanımlı değil.")
         return
+
+    print(f"DB PATH: {DB_PATH}")
 
     app = Application.builder().token(TOKEN).build()
 
