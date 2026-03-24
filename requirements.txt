@@ -1,4 +1,8 @@
-python-telegram-bot==20.7
-duckduckgo-search==6.2.13
-aiohttp==3.9.5
+flask==3.0.3
+gunicorn==22.0.0
+nudenet==3.4.2
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+onnxruntime==1.18.1
+Pillow==10.4.0
 groq
