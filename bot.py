@@ -950,7 +950,7 @@ async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Susturma kaldırmak için yetkin yok.")
 
     if not update.message.reply_to_message or not update.message.reply_to_message.from_user:
-        return await update.message.reply_text("Bir kullanıcı mesajına yanıt verip /unmute kullan.")
+        return await update.message.reply_text("Bir kullanıcıya yanıt verip /unmute kullan.")
     target = update.message.reply_to_message.from_user
     try:
         await context.bot.restrict_chat_member(cid, target.id, full_unmute_permissions())
@@ -1048,7 +1048,7 @@ async def unadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if target_role == "owner":
         return await update.message.reply_text("Owner'dan adminlik alınamaz.")
     if target_role == "sudo":
-        return await update.message.reply_text("Sudo kullanıcıyı adminlikten alamazsın, önce sudoyu kaldırmalısın.")
+        return await update.message.reply_text("Sudo kullanıcıyı adminlikten alamazsın, önce sudoyu kaldır.")
     if not target_member:
         return await update.message.reply_text("Hedef kullanıcı bulunamadı.")
 
@@ -2038,20 +2038,23 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Update işlenirken hata oluştu", exc_info=context.error)
 
 
+# === WEBHOOK VERSION ===
+PORT = int(os.getenv("PORT", 8080))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/") + "/webhook"
+
 def main():
     if not TOKEN:
         print("HATA: BOT_TOKEN tanımlı değil.")
         return
 
     print(f"DB PATH: {DB_PATH}")
+    print(f"WEBHOOK URL: {WEBHOOK_URL}")
     init_db()
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     app = Application.builder().token(TOKEN).build()
     app.add_error_handler(error_handler)
 
+    # --- Komut Handlerları (hepsi aynı kalır) ---
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("yardim", yardim))
@@ -2120,9 +2123,13 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"^\."), dot_command_handler))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_handler))
 
-    print("✅ BOT ÇALIŞIYOR")
-    app.run_polling(close_loop=False)
-
+    # === Webhook başlat ===
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=f"{WEBHOOK_URL}",
+    )
 
 if __name__ == "__main__":
     main()
