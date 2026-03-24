@@ -9,7 +9,6 @@ import datetime
 import unicodedata
 from collections import defaultdict
 
-import aiohttp
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -25,14 +24,9 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from duckduckgo_search import DDGS
 
 TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "/data/bot_database.db")
-
-NSFW_API_URL = os.getenv("NSFW_API_URL", "").strip()
-NSFW_API_KEY = os.getenv("NSFW_API_KEY", "").strip()
-NSFW_THRESHOLD = float(os.getenv("NSFW_THRESHOLD", "0.80"))
 
 BOT_USERNAME_TEXT = "@KGBKORUMABot"
 SUPPORT_URL = "https://t.me/KGBotomasyon"
@@ -92,7 +86,7 @@ URL_PATTERN = re.compile(
 
 ALLOWED_MOD_STAT_FIELDS = {"total_bans", "total_mutes", "total_warns", "total_deleted"}
 ALLOWED_CHAT_SETTING_FIELDS = {
-    "antilink", "welcome", "goodbye", "antispam", "raid_mode", "nsfw_protect",
+    "antilink", "welcome", "goodbye", "antispam", "raid_mode",
     "lock_link", "lock_badword", "lock_flood"
 }
 
@@ -132,8 +126,7 @@ def init_db():
         lock_badword INTEGER DEFAULT 1,
         lock_flood INTEGER DEFAULT 1,
         antispam INTEGER DEFAULT 1,
-        raid_mode INTEGER DEFAULT 0,
-        nsfw_protect INTEGER DEFAULT 1
+        raid_mode INTEGER DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS badwords (
@@ -555,7 +548,7 @@ def help_menu_markup():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"👋 Merhaba!\n"
-        f"{BOT_USERNAME_TEXT} gelişmiş grup koruma, anti-raid ve moderasyon botudur.\n\n"
+        f"{BOT_USERNAME_TEXT} gelişmiş grup koruma ve moderasyon botudur.\n\n"
         "👉 Beni gruba ekleyin ve yönetici yapın.\n"
         "👉 Komutları hem / hem . ile kullanabilirsiniz."
     )
@@ -592,7 +585,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "4. İsteğe bağlı owner tarafından sudo ekle\n"
             "5. Ayarla:\n"
             "• /setlog\n• /antilink on\n• /welcome on\n• /setwelcome Hoş geldin {first}\n• /setrules Kurallar\n"
-            "• /raid on\n• /antispam on\n• /nsfw on",
+            "• /raid on\n• /antispam on",
             reply_markup=back_menu_markup(),
             parse_mode="HTML"
         )
@@ -604,7 +597,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/goodbye on/off\n"
             "/antispam on/off\n"
             "/raid on/off\n"
-            "/nsfw on/off\n"
             "/raidmode\n"
             "/setwelcome <mesaj>\n"
             "/setgoodbye <mesaj>\n"
@@ -630,7 +622,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "help_settings":
         return await q.message.edit_text(
             "⚙️ <b>Ayarlar</b>\n\n"
-            "/antilink\n/welcome\n/goodbye\n/antispam\n/raid\n/raidmode\n/nsfw\n"
+            "/antilink\n/welcome\n/goodbye\n/antispam\n/raid\n/raidmode\n"
             "/setwelcome\n/setgoodbye\n/setlog\n/setrules\n/settings\n/lock\n/unlock\n/addbad\n/delbad\n/badlist\n"
             "/addsudo\n/delsudo\n/sudolist",
             reply_markup=help_menu_markup(),
@@ -1254,7 +1246,6 @@ async def welcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await
 async def goodbye_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await toggle_setting(update, context, "goodbye", "Çıkış mesajı", "goodbye")
 async def antispam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await toggle_setting(update, context, "antispam", "Anti-spam", "antispam")
 async def raid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await toggle_setting(update, context, "raid_mode", "Raid modu", "raid")
-async def nsfw_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE): await toggle_setting(update, context, "nsfw_protect", "+18 koruması", "nsfw")
 
 
 async def raidmode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1262,11 +1253,10 @@ async def raidmode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Bu komut grupta kullanılmalı.")
     cid = update.effective_chat.id
     ensure_chat_settings(cid)
-    row = db_fetchone("SELECT raid_mode, antispam, nsfw_protect FROM chat_settings WHERE chat_id = ?", (cid,))
+    row = db_fetchone("SELECT raid_mode, antispam FROM chat_settings WHERE chat_id = ?", (cid,))
     await update.message.reply_text(
         f"🛡️ Raid Mode: {'Açık' if row and row[0] else 'Kapalı'}\n"
-        f"⚡ Anti-Spam: {'Açık' if row and row[1] else 'Kapalı'}\n"
-        f"🔞 +18 Koruma: {'Açık' if row and row[2] else 'Kapalı'}"
+        f"⚡ Anti-Spam: {'Açık' if row and row[1] else 'Kapalı'}"
     )
 
 
@@ -1346,7 +1336,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_chat_settings(cid)
     row = db_fetchone("""
         SELECT antilink, welcome, goodbye, welcome_text, goodbye_text, log_chat_id, rules_text,
-               lock_link, lock_badword, lock_flood, antispam, raid_mode, nsfw_protect
+               lock_link, lock_badword, lock_flood, antispam, raid_mode
         FROM chat_settings WHERE chat_id = ?
     """, (cid,))
     text = (
@@ -1356,7 +1346,6 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Goodbye: {'Açık' if row[2] else 'Kapalı'}\n"
         f"• Anti-Spam: {'Açık' if row[10] else 'Kapalı'}\n"
         f"• Raid Mode: {'Açık' if row[11] else 'Kapalı'}\n"
-        f"• +18 Koruma: {'Açık' if row[12] else 'Kapalı'}\n"
         f"• Log Chat ID: <code>{row[5]}</code>\n"
         f"• Lock Link: {'Açık' if row[7] else 'Kapalı'}\n"
         f"• Lock Badword: {'Açık' if row[8] else 'Kapalı'}\n"
@@ -1613,62 +1602,6 @@ async def download_telegram_file_bytes(file_obj, context: ContextTypes.DEFAULT_T
         return None
 
 
-async def detect_nsfw_bytes(file_bytes: bytes, filename: str = "media.jpg"):
-    if not NSFW_API_URL or not file_bytes:
-        return False, 0.0
-
-    try:
-        data = aiohttp.FormData()
-        data.add_field("file", file_bytes, filename=filename, content_type="application/octet-stream")
-
-        headers = {}
-        if NSFW_API_KEY:
-            headers["Authorization"] = f"Bearer {NSFW_API_KEY}"
-
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(NSFW_API_URL, data=data, headers=headers) as resp:
-                if resp.status != 200:
-                    logger.error(f"nsfw api status: {resp.status}")
-                    return False, 0.0
-                js = await resp.json()
-
-        score = float(js.get("nsfw_score", 0.0))
-        is_nsfw = bool(js.get("is_nsfw", score >= NSFW_THRESHOLD))
-        return is_nsfw, score
-    except Exception as e:
-        logger.error(f"nsfw tespit hatası: {e}")
-        return False, 0.0
-
-
-async def detect_message_nsfw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg:
-        return False, 0.0
-
-    if msg.photo:
-        largest = msg.photo[-1]
-        file_bytes = await download_telegram_file_bytes(largest, context)
-        return await detect_nsfw_bytes(file_bytes or b"", "photo.jpg")
-
-    if msg.animation:
-        file_bytes = await download_telegram_file_bytes(msg.animation, context)
-        return await detect_nsfw_bytes(file_bytes or b"", "animation.gif")
-
-    if msg.document:
-        mime = (msg.document.mime_type or "").lower()
-        name = (msg.document.file_name or "document.bin").lower()
-        if mime.startswith("image/") or mime == "image/gif" or name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
-            file_bytes = await download_telegram_file_bytes(msg.document, context)
-            return await detect_nsfw_bytes(file_bytes or b"", name)
-
-    if msg.video:
-        file_bytes = await download_telegram_file_bytes(msg.video, context)
-        return await detect_nsfw_bytes(file_bytes or b"", "video.mp4")
-
-    return False, 0.0
-
-
 def looks_deleted_account(user) -> bool:
     if not user:
         return False
@@ -1773,7 +1706,7 @@ async def dot_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         "admin": admin_cmd, "unadmin": unadmin_cmd,
         "addsudo": addsudo_cmd, "delsudo": delsudo_cmd, "sudolist": sudolist_cmd,
         "antilink": antilink_cmd, "welcome": welcome_cmd, "goodbye": goodbye_cmd,
-        "antispam": antispam_cmd, "raid": raid_cmd, "raidmode": raidmode_cmd, "nsfw": nsfw_cmd,
+        "antispam": antispam_cmd, "raid": raid_cmd, "raidmode": raidmode_cmd,
         "setwelcome": setwelcome, "setgoodbye": setgoodbye,
         "setlog": setlog, "setrules": setrules, "settings": settings_cmd,
         "addbad": addbad, "delbad": delbad, "badlist": badlist,
@@ -1898,7 +1831,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     row = db_fetchone("""
-        SELECT antilink, lock_link, lock_badword, lock_flood, antispam, raid_mode, nsfw_protect
+        SELECT antilink, lock_link, lock_badword, lock_flood, antispam, raid_mode
         FROM chat_settings WHERE chat_id = ?
     """, (cid,))
     antilink_on = row[0] == 1
@@ -1907,7 +1840,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lock_flood = row[3] == 1
     antispam_on = row[4] == 1
     raid_mode_on = row[5] == 1
-    nsfw_protect_on = row[6] == 1
 
     delete_reason = None
     should_auto_mute_repeat = False
@@ -1926,11 +1858,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if bw and bw in compact_text:
                 delete_reason = "Yasaklı kelime"
                 break
-
-    if not delete_reason and nsfw_protect_on and (update.message.photo or update.message.animation or update.message.document or update.message.video):
-        is_nsfw, score = await detect_message_nsfw(update, context)
-        if is_nsfw:
-            delete_reason = f"+18 medya tespit edildi (score={score:.2f})"
 
     if not delete_reason and lock_flood and antispam_on:
         now = time.time()
@@ -2038,7 +1965,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Update işlenirken hata oluştu", exc_info=context.error)
 
 
-# === WEBHOOK VERSION ===
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/") + "/webhook"
 
@@ -2054,7 +1980,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_error_handler(error_handler)
 
-    # --- Komut Handlerları (hepsi aynı kalır) ---
+    # --- Komut Handlerları ---
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("yardim", yardim))
@@ -2093,7 +2019,6 @@ def main():
     app.add_handler(CommandHandler("antispam", antispam_cmd))
     app.add_handler(CommandHandler("raid", raid_cmd))
     app.add_handler(CommandHandler("raidmode", raidmode_cmd))
-    app.add_handler(CommandHandler("nsfw", nsfw_cmd))
     app.add_handler(CommandHandler("setwelcome", setwelcome))
     app.add_handler(CommandHandler("setgoodbye", setgoodbye))
     app.add_handler(CommandHandler("setlog", setlog))
