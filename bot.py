@@ -1,11 +1,12 @@
-# bot.py (STABİL - DB YOK - Volume(JSON) ile kalıcı - LOG YOK)
-# MissRose tarzı: yetki kontrolü, / ve . komutları, anti-spam, notlar/filtreler, lock types, captcha, uyarı sistemi vb.
+# bot.py (TEK DOSYA) - STABİL - DB YOK - Volume(JSON) ile KALICI - LOG YOK
+# MissRose tarzı: yetki kontrolü, / ve . komutları, anti-spam, notlar/filtreler,
+# lock types, captcha, uyarı sistemi (sebepli), anti-raid, purge/del, promote/demote vb.
 #
-# Önerilen requirements.txt:
+# requirements.txt:
 #   aiogram==3.6.0
 #
 # Railway Volume:
-#   Volume mount path: /data
+#   Mount path: /data
 #   ENV: STATE_PATH=/data/state.json
 #
 # ENV:
@@ -45,21 +46,20 @@ CMD_PREFIXES = "/."
 URL_RE = re.compile(r"(https?://|t\.me/|telegram\.me/|www\.)\S+", re.IGNORECASE)
 DUR_RE = re.compile(r"(\d+)\s*([smhdw])", re.IGNORECASE)
 
-LOCK_TYPES = {
-    "links", "all", "media", "photos", "videos", "documents", "stickers", "gifs", "voice", "audio"
-}
+LOCK_TYPES = {"links", "all", "media", "photos", "videos", "documents", "stickers", "gifs", "voice", "audio"}
+
+BOT_ID: Optional[int] = None  # runtime cache
+
 
 def CMD(*names: str) -> Command:
-    # /komut ve .komut
     return Command(commands=list(names), prefix=CMD_PREFIXES, ignore_case=True, ignore_mention=True)
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
+
 def parse_duration_to_seconds(s: str) -> Optional[int]:
-    """
-    10m, 2h, 1d, 1w, 1h30m
-    """
     s = (s or "").strip().lower().replace(" ", "")
     if not s:
         return None
@@ -84,6 +84,7 @@ class Config:
     default_warn_limit: int = 3
     default_mute_seconds: int = 3600
 
+
 def load_config() -> Config:
     token = (os.getenv("BOT_TOKEN") or "").strip()
     if not token:
@@ -103,17 +104,16 @@ def load_config() -> Config:
 
 
 # ----------------- STATE (JSON, VOLUME KALICI) -----------------
-# NOT: Telegram Bot API username -> user_id direkt çözmez.
-# Bu yüzden @username ile işlem, bot o kullanıcıyı daha önce görmüşse çalışır (cache).
 
 STATE_LOCK = asyncio.Lock()
 SAVE_TASK: Optional[asyncio.Task] = None
 
 STATE: Dict[str, Any] = {
-    "username_cache": {},   # "username" -> user_id
-    "chats": {},            # str(chat_id) -> chat_state
+    "username_cache": {},  # "username" -> user_id
+    "chats": {},           # str(chat_id) -> chat_state
     "saved_at": None
 }
+
 
 def chat_state(chat_id: int, config: Config) -> Dict[str, Any]:
     chats = STATE.setdefault("chats", {})
@@ -141,15 +141,15 @@ def chat_state(chat_id: int, config: Config) -> Dict[str, Any]:
                     "enabled": False,
                     "max_msgs": 6,
                     "per_sec": 5,
-                    "action": "tmute",       # "warn" veya "tmute"
+                    "action": "tmute",   # warn veya tmute
                     "mute_sec": 300,
                 },
 
                 "anticaps": {
                     "enabled": False,
-                    "ratio": 0.7,            # büyük harf oranı
+                    "ratio": 0.7,
                     "min_len": 12,
-                    "action": "warn"         # warn veya del
+                    "action": "warn"
                 },
 
                 "antiemoji": {
@@ -166,26 +166,23 @@ def chat_state(chat_id: int, config: Config) -> Dict[str, Any]:
 
                 "antiraid": {
                     "enabled": False,
-                    "threshold": 8,          # pencere içinde kaç join olursa
+                    "threshold": 8,
                     "window_sec": 60,
                     "lock_sec": 120,
                 },
 
-                "locks": []  # örn: ["links", "photos"]
+                "locks": []  # ["links", "photos", ...]
             },
 
             "warns": {
                 # "user_id": {"count": int, "reasons": [{"by":id, "at":iso, "reason":text}]}
             },
 
-            "notes": {     # "name": "content"
-            },
-
-            "filters": {   # "keyword": "response"
-            },
+            "notes": {},
+            "filters": {},
 
             "captcha_pending": {
-                # "user_id": {"expires_at": iso, "message_id": int|None}
+                # "user_id": {"expires_at": iso, "message_id": int}
             },
 
             "raid": {
@@ -194,6 +191,7 @@ def chat_state(chat_id: int, config: Config) -> Dict[str, Any]:
         }
         chats[key] = cs
     return cs
+
 
 def schedule_save(config: Config, delay: float = 1.5):
     global SAVE_TASK
@@ -207,22 +205,23 @@ def schedule_save(config: Config, delay: float = 1.5):
 
     SAVE_TASK = asyncio.create_task(_job())
 
+
 async def load_state(path: str):
     global STATE
     if not os.path.exists(path):
         return
+
     def _read():
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
+
     try:
         data = await asyncio.to_thread(_read)
-        if isinstance(data, dict):
-            # basit doğrulama
-            if "username_cache" in data and "chats" in data:
-                STATE = data
+        if isinstance(data, dict) and "username_cache" in data and "chats" in data:
+            STATE = data
     except Exception:
-        # bozuk dosya varsa bot yine çalışsın
         pass
+
 
 async def save_state(path: str):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -242,6 +241,7 @@ async def save_state(path: str):
 def muted_permissions() -> ChatPermissions:
     return ChatPermissions(can_send_messages=False)
 
+
 def open_permissions() -> ChatPermissions:
     return ChatPermissions(
         can_send_messages=True,
@@ -260,8 +260,10 @@ def open_permissions() -> ChatPermissions:
         can_pin_messages=False,
     )
 
+
 def is_admin_status(member) -> bool:
     return getattr(member, "status", None) in ("administrator", "creator")
+
 
 def has_right(member, right: str) -> bool:
     if getattr(member, "status", None) == "creator":
@@ -270,18 +272,24 @@ def has_right(member, right: str) -> bool:
         return False
     return bool(getattr(member, right, False))
 
+
 async def require_user_right(bot: Bot, chat_id: int, user_id: int, right: Optional[str]) -> bool:
     m = await bot.get_chat_member(chat_id, user_id)
     if not is_admin_status(m):
         return False
     return True if right is None else has_right(m, right)
 
+
 async def require_bot_right(bot: Bot, chat_id: int, right: Optional[str]) -> bool:
-    me = await bot.get_me()
-    m = await bot.get_chat_member(chat_id, me.id)
+    global BOT_ID
+    if BOT_ID is None:
+        BOT_ID = (await bot.get_me()).id
+
+    m = await bot.get_chat_member(chat_id, BOT_ID)
     if not is_admin_status(m):
         return False
     return True if right is None else has_right(m, right)
+
 
 async def is_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     m = await bot.get_chat_member(chat_id, user_id)
@@ -297,13 +305,14 @@ async def resolve_username(username: str) -> Optional[int]:
     u = u.lower().strip()
     if not u:
         return None
-    return int(STATE.get("username_cache", {}).get(u)) if STATE.get("username_cache", {}).get(u) else None
+    v = (STATE.get("username_cache") or {}).get(u)
+    return int(v) if v else None
+
 
 async def parse_target(message: Message) -> Tuple[Optional[int], str]:
     if message.reply_to_message and message.reply_to_message.from_user:
         return message.reply_to_message.from_user.id, "reply"
 
-    # text_mention entity -> direkt user id
     if message.entities:
         for ent in message.entities:
             if ent.type == "text_mention" and ent.user:
@@ -325,6 +334,7 @@ async def parse_target(message: Message) -> Tuple[Optional[int], str]:
 
     return None, "bad_target"
 
+
 async def need_target(message: Message) -> Optional[int]:
     tid, mode = await parse_target(message)
     if tid:
@@ -332,7 +342,7 @@ async def need_target(message: Message) -> Optional[int]:
     if mode == "username_unknown":
         await message.reply(
             "Bu @username için ID bilmiyorum.\n"
-            "Kullanıcı grupta yazsın/katılsın (bot görsün) sonra tekrar dene. (Telegram kısıtı)"
+            "Kullanıcı grupta yazsın/katılsın (bot görsün), sonra tekrar dene. (Telegram kısıtı)"
         )
         return None
     await message.reply("Hedef yok. Reply yap veya .komut <id> / .komut @username yaz.")
@@ -349,6 +359,7 @@ class InjectConfigMiddleware(BaseMiddleware):
         data["config"] = self.config
         return await handler(event, data)
 
+
 class UsernameCacheMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         config: Config = data["config"]
@@ -363,24 +374,153 @@ class UsernameCacheMiddleware(BaseMiddleware):
 
 
 # ----------------- RUNTIME TRACKERS (RAM) -----------------
-# Flood: (chat_id,user_id) -> deque[timestamps]
 FLOOD: Dict[Tuple[int, int], Deque[float]] = {}
-
-# Raid: chat_id -> deque[join_ts]
 JOINS: Dict[int, Deque[float]] = {}
 
 
-# ----------------- BOT ROUTER -----------------
+# ----------------- GUARD HELPERS -----------------
+
+def count_mentions(message: Message) -> int:
+    c = 0
+    if not message.entities:
+        return 0
+    for e in message.entities:
+        if e.type in ("mention", "text_mention"):
+            c += 1
+    return c
+
+
+def count_emojis(text: str) -> int:
+    n = 0
+    for ch in text:
+        o = ord(ch)
+        if (0x1F300 <= o <= 0x1FAFF) or (0x2600 <= o <= 0x26FF) or (0x2700 <= o <= 0x27BF):
+            n += 1
+    return n
+
+
+def caps_ratio(text: str) -> float:
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return 0.0
+    upper = sum(1 for c in letters if c.isupper())
+    return upper / max(1, len(letters))
+
+
+async def try_delete(message: Message, bot: Bot) -> bool:
+    try:
+        if await require_bot_right(bot, message.chat.id, "can_delete_messages"):
+            await message.delete()
+            return True
+    except:
+        pass
+    return False
+
+
+async def add_warn(chat_id: int, user_id: int, by_id: int, reason: str, config: Config) -> int:
+    cs = chat_state(chat_id, config)
+    w = cs.setdefault("warns", {})
+    u = w.get(str(user_id)) or {"count": 0, "reasons": []}
+
+    u["count"] = int(u.get("count", 0)) + 1
+    reasons = (u.get("reasons") or [])[-9:]  # son 10
+    reasons.append({"by": by_id, "at": utcnow().isoformat() + "Z", "reason": reason or "-"})
+    u["reasons"] = reasons
+
+    w[str(user_id)] = u
+    schedule_save(config)
+    return u["count"]
+
+
+async def punish_warn_or_tmute(
+    message: Message,
+    bot: Bot,
+    config: Config,
+    reason: str,
+    action: str,
+    tmute_sec: int = 300
+):
+    if not message.chat or not message.from_user:
+        return
+
+    if await is_admin(bot, message.chat.id, message.from_user.id):
+        return
+
+    if action == "warn":
+        count = await add_warn(message.chat.id, message.from_user.id, by_id=0, reason=reason, config=config)
+        cs = chat_state(message.chat.id, config)
+        limit = int(cs["settings"].get("warn_limit") or config.default_warn_limit)
+        if count >= limit and await require_bot_right(bot, message.chat.id, "can_restrict_members"):
+            mute_sec = int(cs["settings"].get("mute_seconds") or config.default_mute_seconds)
+            until = datetime.utcnow() + timedelta(seconds=mute_sec)
+            try:
+                await bot.restrict_chat_member(message.chat.id, message.from_user.id, permissions=muted_permissions(), until_date=until)
+            except:
+                pass
+    else:
+        if await require_bot_right(bot, message.chat.id, "can_restrict_members"):
+            until = datetime.utcnow() + timedelta(seconds=tmute_sec)
+            try:
+                await bot.restrict_chat_member(message.chat.id, message.from_user.id, permissions=muted_permissions(), until_date=until)
+            except:
+                pass
+
+
+# ----------------- ROUTER -----------------
 
 router = Router()
 
-# ---- YARDIM / BİLGİ ----
+# ---- ID KOMUTU (İSTEDİĞİN) ----
+@router.message(CMD("id"))
+async def id_cmd(message: Message):
+    """
+    /id veya .id
+    - reply varsa hedefin id
+    - .id @username (cache'de varsa)
+    - .id 123 (id)
+    """
+    if not message.chat:
+        return
+
+    chat_id = message.chat.id
+    my_id = message.from_user.id if message.from_user else None
+
+    target_id = None
+
+    # reply hedefi
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+    else:
+        # arg varsa
+        parts = (message.text or "").split()
+        if len(parts) >= 2:
+            arg = parts[1].strip()
+            if arg.lstrip("-").isdigit():
+                target_id = int(arg)
+            elif arg.startswith("@"):
+                target_id = await resolve_username(arg)
+
+    lines = [f"Sohbet ID: <code>{chat_id}</code>"]
+    if my_id:
+        lines.append(f"Senin ID: <code>{my_id}</code>")
+    if target_id:
+        lines.append(f"Hedef ID: <code>{target_id}</code>")
+    elif (message.text or "").split().__len__() >= 2:
+        # arg verilmiş ama çözülemedi
+        if (message.text or "").split()[1].startswith("@"):
+            lines.append("Hedef ID: Bulunamadı (bot bu kullanıcıyı daha önce görmemiş olabilir).")
+
+    await message.reply("\n".join(lines))
+
+
+# ---- YARDIM / GENEL ----
 
 @router.message(CMD("help", "yardim", "komutlar"))
 async def help_cmd(message: Message):
     await message.reply(
         "<b>Komutlar</b> ( / veya . )\n\n"
         "<b>Genel</b>\n"
+        "• .id (reply/@user/id)\n"
         "• .rules\n"
         "• .get <not>\n"
         "• .notes\n\n"
@@ -447,7 +587,7 @@ async def notes_list_cmd(message: Message, config: Config):
     if not message.chat or message.chat.type == "private":
         return
     cs = chat_state(message.chat.id, config)
-    names = sorted(cs.get("notes", {}).keys())
+    names = sorted((cs.get("notes") or {}).keys())
     if not names:
         return await message.reply("Not yok.")
     await message.reply("Notlar:\n" + "\n".join(f"• <code>{n}</code>" for n in names))
@@ -461,10 +601,11 @@ async def get_note_cmd(message: Message, config: Config):
         return await message.reply("Kullanım: .get <not_adı>")
     name = parts[1].strip().lower()
     cs = chat_state(message.chat.id, config)
-    note = cs.get("notes", {}).get(name)
+    note = (cs.get("notes") or {}).get(name)
     if not note:
         return await message.reply("Not bulunamadı.")
     await message.reply(note)
+
 
 # ---- ADMIN AYARLARI ----
 
@@ -474,11 +615,9 @@ async def setrules_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, None):
         return await message.reply("Sadece admin.")
-
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         return await message.reply("Kullanım: .setrules <metin>")
-
     cs = chat_state(message.chat.id, config)
     cs["settings"]["rules"] = parts[1]
     schedule_save(config)
@@ -490,11 +629,9 @@ async def setwelcome_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, None):
         return await message.reply("Sadece admin.")
-
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         return await message.reply("Kullanım: .setwelcome Hoşgeldin {first_name}")
-
     cs = chat_state(message.chat.id, config)
     cs["settings"]["welcome"] = parts[1]
     schedule_save(config)
@@ -509,7 +646,6 @@ async def antilink_cmd(message: Message, bot: Bot, config: Config):
     parts = (message.text or "").split()
     if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
         return await message.reply("Kullanım: .antilink on | off")
-
     cs = chat_state(message.chat.id, config)
     cs["settings"]["antilink"] = (parts[1].lower() == "on")
     schedule_save(config)
@@ -524,7 +660,6 @@ async def antiforward_cmd(message: Message, bot: Bot, config: Config):
     parts = (message.text or "").split()
     if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
         return await message.reply("Kullanım: .antiforward on | off")
-
     cs = chat_state(message.chat.id, config)
     cs["settings"]["antiforward"] = (parts[1].lower() == "on")
     schedule_save(config)
@@ -539,7 +674,6 @@ async def antiservice_cmd(message: Message, bot: Bot, config: Config):
     parts = (message.text or "").split()
     if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
         return await message.reply("Kullanım: .antiservice on | off")
-
     cs = chat_state(message.chat.id, config)
     cs["settings"]["antiservice"] = (parts[1].lower() == "on")
     schedule_save(config)
@@ -551,11 +685,9 @@ async def adminonly_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_delete_messages"):
         return await message.reply("Yetki yok: can_delete_messages")
-
     parts = (message.text or "").split()
     if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
         return await message.reply("Kullanım: .adminonly on | off")
-
     cs = chat_state(message.chat.id, config)
     cs["settings"]["adminonly"] = (parts[1].lower() == "on")
     schedule_save(config)
@@ -567,11 +699,9 @@ async def captcha_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_restrict_members"):
         return await message.reply("Yetki yok: can_restrict_members")
-
     parts = (message.text or "").split()
     if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
         return await message.reply("Kullanım: .captcha on | off")
-
     cs = chat_state(message.chat.id, config)
     cs["settings"]["captcha"] = (parts[1].lower() == "on")
     schedule_save(config)
@@ -583,11 +713,9 @@ async def setcaptchatimeout_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_restrict_members"):
         return await message.reply("Yetki yok: can_restrict_members")
-
     parts = (message.text or "").split()
     if len(parts) != 2 or not parts[1].isdigit():
         return await message.reply("Kullanım: .setcaptchatimeout 120")
-
     sec = max(10, min(3600, int(parts[1])))
     cs = chat_state(message.chat.id, config)
     cs["settings"]["captcha_timeout_sec"] = sec
@@ -600,11 +728,9 @@ async def setwarnlimit_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_restrict_members"):
         return await message.reply("Yetki yok: can_restrict_members")
-
     parts = (message.text or "").split()
     if len(parts) != 2 or not parts[1].isdigit():
         return await message.reply("Kullanım: .setwarnlimit 3")
-
     limit = max(1, min(20, int(parts[1])))
     cs = chat_state(message.chat.id, config)
     cs["settings"]["warn_limit"] = limit
@@ -617,11 +743,9 @@ async def setmutetime_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_restrict_members"):
         return await message.reply("Yetki yok: can_restrict_members")
-
     parts = (message.text or "").split()
     if len(parts) != 2:
-        return await message.reply("Kullanım: .setmutetime 1h  (örn: 30m, 2h, 1d)")
-
+        return await message.reply("Kullanım: .setmutetime 1h (örn: 30m, 2h, 1d)")
     sec = parse_duration_to_seconds(parts[1])
     if sec is None or sec == 0:
         return await message.reply("Geçersiz süre. Örn: 30m, 2h, 1d")
@@ -630,7 +754,8 @@ async def setmutetime_cmd(message: Message, bot: Bot, config: Config):
     schedule_save(config)
     await message.reply(f"Varsayılan mute süresi: {parts[1]} ({sec}s)")
 
-# ---- AntiFlood / AntiRaid / AntiCaps / AntiEmoji / AntiMention ----
+
+# ---- KORUMA: FLOOD/RAID/CAPS/EMOJI/MENTION ----
 
 @router.message(CMD("antiflood"))
 async def antiflood_cmd(message: Message, bot: Bot, config: Config):
@@ -641,7 +766,6 @@ async def antiflood_cmd(message: Message, bot: Bot, config: Config):
     parts = (message.text or "").split()
     if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
         return await message.reply("Kullanım: .antiflood on | off")
-
     cs = chat_state(message.chat.id, config)
     cs["settings"]["antiflood"]["enabled"] = (parts[1].lower() == "on")
     schedule_save(config)
@@ -649,39 +773,26 @@ async def antiflood_cmd(message: Message, bot: Bot, config: Config):
 
 @router.message(CMD("setflood"))
 async def setflood_cmd(message: Message, bot: Bot, config: Config):
-    """
-    .setflood <max> <sec> <warn|tmute> [tmute_saniye]
-    """
     if not message.chat or message.chat.type == "private" or not message.from_user:
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, None):
         return await message.reply("Sadece admin.")
-
     parts = (message.text or "").split()
     if len(parts) < 4:
         return await message.reply("Kullanım: .setflood 6 5 tmute 300  (veya warn)")
-
     if not parts[1].isdigit() or not parts[2].isdigit():
         return await message.reply("Hatalı sayı. Örn: .setflood 6 5 tmute 300")
-
     max_msgs = max(2, min(30, int(parts[1])))
     per_sec = max(2, min(30, int(parts[2])))
     action = parts[3].lower()
     if action not in ("warn", "tmute"):
         return await message.reply("Action sadece: warn veya tmute")
-
     mute_sec = 300
     if action == "tmute":
         if len(parts) >= 5 and parts[4].isdigit():
             mute_sec = max(10, min(86400, int(parts[4])))
-
     cs = chat_state(message.chat.id, config)
-    cs["settings"]["antiflood"].update({
-        "max_msgs": max_msgs,
-        "per_sec": per_sec,
-        "action": action,
-        "mute_sec": mute_sec
-    })
+    cs["settings"]["antiflood"].update({"max_msgs": max_msgs, "per_sec": per_sec, "action": action, "mute_sec": mute_sec})
     schedule_save(config)
     await message.reply(f"Flood ayarı: {max_msgs} mesaj / {per_sec}s, action={action}, tmute={mute_sec}s")
 
@@ -694,7 +805,6 @@ async def antiraid_cmd(message: Message, bot: Bot, config: Config):
     parts = (message.text or "").split()
     if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
         return await message.reply("Kullanım: .antiraid on | off")
-
     cs = chat_state(message.chat.id, config)
     cs["settings"]["antiraid"]["enabled"] = (parts[1].lower() == "on")
     schedule_save(config)
@@ -702,45 +812,30 @@ async def antiraid_cmd(message: Message, bot: Bot, config: Config):
 
 @router.message(CMD("setraid"))
 async def setraid_cmd(message: Message, bot: Bot, config: Config):
-    """
-    .setraid <threshold> <window_sec> <lock_sec>
-    """
     if not message.chat or message.chat.type == "private" or not message.from_user:
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, None):
         return await message.reply("Sadece admin.")
-
     parts = (message.text or "").split()
     if len(parts) != 4 or not all(p.isdigit() for p in parts[1:]):
         return await message.reply("Kullanım: .setraid 8 60 120")
-
     threshold = max(3, min(50, int(parts[1])))
     window_sec = max(10, min(600, int(parts[2])))
     lock_sec = max(10, min(3600, int(parts[3])))
-
     cs = chat_state(message.chat.id, config)
-    cs["settings"]["antiraid"].update({
-        "threshold": threshold,
-        "window_sec": window_sec,
-        "lock_sec": lock_sec
-    })
+    cs["settings"]["antiraid"].update({"threshold": threshold, "window_sec": window_sec, "lock_sec": lock_sec})
     schedule_save(config)
     await message.reply(f"Raid ayarı: threshold={threshold}, window={window_sec}s, lock={lock_sec}s")
 
 @router.message(CMD("anticaps"))
 async def anticaps_cmd(message: Message, bot: Bot, config: Config):
-    """
-    .anticaps on|off [ratio]
-    """
     if not message.chat or message.chat.type == "private" or not message.from_user:
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, None):
         return await message.reply("Sadece admin.")
-
     parts = (message.text or "").split()
     if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
         return await message.reply("Kullanım: .anticaps on|off 0.7")
-
     cs = chat_state(message.chat.id, config)
     cs["settings"]["anticaps"]["enabled"] = (parts[1].lower() == "on")
     if len(parts) >= 3:
@@ -755,18 +850,13 @@ async def anticaps_cmd(message: Message, bot: Bot, config: Config):
 
 @router.message(CMD("antiemoji"))
 async def antiemoji_cmd(message: Message, bot: Bot, config: Config):
-    """
-    .antiemoji on|off [max]
-    """
     if not message.chat or message.chat.type == "private" or not message.from_user:
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, None):
         return await message.reply("Sadece admin.")
-
     parts = (message.text or "").split()
     if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
         return await message.reply("Kullanım: .antiemoji on|off 12")
-
     cs = chat_state(message.chat.id, config)
     cs["settings"]["antiemoji"]["enabled"] = (parts[1].lower() == "on")
     if len(parts) >= 3 and parts[2].isdigit():
@@ -776,18 +866,13 @@ async def antiemoji_cmd(message: Message, bot: Bot, config: Config):
 
 @router.message(CMD("antimention"))
 async def antimention_cmd(message: Message, bot: Bot, config: Config):
-    """
-    .antimention on|off [max]
-    """
     if not message.chat or message.chat.type == "private" or not message.from_user:
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, None):
         return await message.reply("Sadece admin.")
-
     parts = (message.text or "").split()
     if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
         return await message.reply("Kullanım: .antimention on|off 6")
-
     cs = chat_state(message.chat.id, config)
     cs["settings"]["antimention"]["enabled"] = (parts[1].lower() == "on")
     if len(parts) >= 3 and parts[2].isdigit():
@@ -804,24 +889,20 @@ async def lock_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_delete_messages"):
         return await message.reply("Yetki yok: can_delete_messages")
-
     parts = (message.text or "").split()
     if len(parts) != 2:
         return await message.reply("Kullanım: .lock links|media|photos|videos|documents|stickers|gifs|voice|audio|all")
-
     t = parts[1].lower()
     if t not in LOCK_TYPES:
         return await message.reply("Geçersiz type.")
-
     cs = chat_state(message.chat.id, config)
     locks = set(cs["settings"].get("locks") or [])
     if t == "all":
-        locks.update({"links", "media", "photos", "videos", "documents", "stickers", "gifs", "voice", "audio"})
+        locks.update({"links", "photos", "videos", "documents", "stickers", "gifs", "voice", "audio"})
     elif t == "media":
         locks.update({"photos", "videos", "documents", "stickers", "gifs", "voice", "audio"})
     else:
         locks.add(t)
-
     cs["settings"]["locks"] = sorted(list(locks))
     schedule_save(config)
     await message.reply("Lock aktif: " + ", ".join(cs["settings"]["locks"]))
@@ -832,25 +913,20 @@ async def unlock_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_delete_messages"):
         return await message.reply("Yetki yok: can_delete_messages")
-
     parts = (message.text or "").split()
     if len(parts) != 2:
         return await message.reply("Kullanım: .unlock links|media|photos|videos|documents|stickers|gifs|voice|audio|all")
-
     t = parts[1].lower()
     if t not in LOCK_TYPES:
         return await message.reply("Geçersiz type.")
-
     cs = chat_state(message.chat.id, config)
     locks = set(cs["settings"].get("locks") or [])
-
     if t == "all":
         locks.clear()
     elif t == "media":
         locks.difference_update({"photos", "videos", "documents", "stickers", "gifs", "voice", "audio"})
     else:
         locks.discard(t)
-
     cs["settings"]["locks"] = sorted(list(locks))
     schedule_save(config)
     await message.reply("Lock aktif: " + (", ".join(cs["settings"]["locks"]) if cs["settings"]["locks"] else "YOK"))
@@ -864,7 +940,7 @@ async def locks_list_cmd(message: Message, config: Config):
     await message.reply("Lock aktif: " + (", ".join(locks) if locks else "YOK"))
 
 
-# ----------------- NOTLAR / FİLTRELER -----------------
+# ---- NOTLAR / FİLTRELER ----
 
 @router.message(CMD("save"))
 async def save_note_cmd(message: Message, bot: Bot, config: Config):
@@ -872,14 +948,11 @@ async def save_note_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, None):
         return await message.reply("Sadece admin.")
-
     parts = (message.text or "").split(maxsplit=2)
     if len(parts) < 3:
         return await message.reply("Kullanım: .save <ad> <içerik>")
-
     name = parts[1].strip().lower()
     content = parts[2].strip()
-
     cs = chat_state(message.chat.id, config)
     cs.setdefault("notes", {})[name] = content
     schedule_save(config)
@@ -891,14 +964,12 @@ async def delnote_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, None):
         return await message.reply("Sadece admin.")
-
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         return await message.reply("Kullanım: .delnote <ad>")
-
     name = parts[1].strip().lower()
     cs = chat_state(message.chat.id, config)
-    if name in cs.get("notes", {}):
+    if name in (cs.get("notes") or {}):
         del cs["notes"][name]
         schedule_save(config)
         return await message.reply("Silindi.")
@@ -910,14 +981,11 @@ async def add_filter_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, None):
         return await message.reply("Sadece admin.")
-
     parts = (message.text or "").split(maxsplit=2)
     if len(parts) < 3:
         return await message.reply("Kullanım: .filter <kelime> <cevap>")
-
     key = parts[1].strip().lower()
     resp = parts[2].strip()
-
     cs = chat_state(message.chat.id, config)
     cs.setdefault("filters", {})[key] = resp
     schedule_save(config)
@@ -929,14 +997,12 @@ async def del_filter_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, None):
         return await message.reply("Sadece admin.")
-
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         return await message.reply("Kullanım: .stop <kelime>")
-
     key = parts[1].strip().lower()
     cs = chat_state(message.chat.id, config)
-    if key in cs.get("filters", {}):
+    if key in (cs.get("filters") or {}):
         del cs["filters"][key]
         schedule_save(config)
         return await message.reply("Filter silindi.")
@@ -947,28 +1013,17 @@ async def filters_list_cmd(message: Message, config: Config):
     if not message.chat or message.chat.type == "private":
         return
     cs = chat_state(message.chat.id, config)
-    keys = sorted(cs.get("filters", {}).keys())
+    keys = sorted((cs.get("filters") or {}).keys())
     if not keys:
         return await message.reply("Filter yok.")
     await message.reply("Filterler:\n" + "\n".join(f"• <code>{k}</code>" for k in keys))
 
 
-# ----------------- MODERASYON -----------------
+# ---- MODERASYON ----
 
-async def add_warn(chat_id: int, user_id: int, by_id: int, reason: str, config: Config) -> int:
+def get_warn(chat_id: int, user_id: int, config: Config) -> Dict[str, Any]:
     cs = chat_state(chat_id, config)
-    w = cs.setdefault("warns", {})
-    u = w.get(str(user_id)) or {"count": 0, "reasons": []}
-    u["count"] = int(u.get("count", 0)) + 1
-    u["reasons"] = (u.get("reasons") or [])[-9:]  # son 10 kayıt
-    u["reasons"].append({
-        "by": by_id,
-        "at": utcnow().isoformat() + "Z",
-        "reason": reason or "-"
-    })
-    w[str(user_id)] = u
-    schedule_save(config)
-    return u["count"]
+    return (cs.get("warns", {}) or {}).get(str(user_id)) or {"count": 0, "reasons": []}
 
 async def remove_warn(chat_id: int, user_id: int, config: Config) -> int:
     cs = chat_state(chat_id, config)
@@ -981,32 +1036,21 @@ async def remove_warn(chat_id: int, user_id: int, config: Config) -> int:
     schedule_save(config)
     return u["count"]
 
-def get_warn(chat_id: int, user_id: int, config: Config) -> Dict[str, Any]:
-    cs = chat_state(chat_id, config)
-    return (cs.get("warns", {}) or {}).get(str(user_id)) or {"count": 0, "reasons": []}
-
 @router.message(CMD("warn"))
 async def warn_cmd(message: Message, bot: Bot, config: Config):
     if not message.chat or message.chat.type == "private" or not message.from_user:
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_restrict_members"):
         return await message.reply("Yetki yok: can_restrict_members")
-
     tid = await need_target(message)
     if not tid:
         return
-
-    # sebep
-    txt = (message.text or "")
-    parts = txt.split(maxsplit=2)
+    parts = (message.text or "").split(maxsplit=2)
     reason = parts[2] if len(parts) >= 3 else ""
-
     count = await add_warn(message.chat.id, tid, message.from_user.id, reason, config)
     cs = chat_state(message.chat.id, config)
     limit = int(cs["settings"].get("warn_limit") or config.default_warn_limit)
-
     if count >= limit:
-        # limit aşınca otomatik tmute (varsayılan mute_seconds)
         if await require_bot_right(bot, message.chat.id, "can_restrict_members"):
             mute_sec = int(cs["settings"].get("mute_seconds") or config.default_mute_seconds)
             until = datetime.utcnow() + timedelta(seconds=mute_sec)
@@ -1026,11 +1070,9 @@ async def unwarn_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_restrict_members"):
         return await message.reply("Yetki yok: can_restrict_members")
-
     tid = await need_target(message)
     if not tid:
         return
-
     new_count = await remove_warn(message.chat.id, tid, config)
     await message.reply(f"Uyarı düşürüldü: <code>{tid}</code> (şimdi: {new_count})")
 
@@ -1048,22 +1090,32 @@ async def warnings_cmd(message: Message, config: Config):
 async def warnslist_cmd(message: Message, bot: Bot, config: Config):
     if not message.chat or message.chat.type == "private":
         return
-    # admin olan herkes bakabilsin (Rose gibi)
     if message.from_user and not await require_user_right(bot, message.chat.id, message.from_user.id, None):
         return await message.reply("Sadece admin.")
 
-    tid = await need_target(message) if (message.text or "").split(maxsplit=1).__len__() > 1 or message.reply_to_message else None
-    if not tid:
-        # hedef yoksa reply değilse, kendi
-        tid = message.from_user.id if message.from_user else None
-    if not tid:
+    tid = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        tid = message.reply_to_message.from_user.id
+    else:
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) >= 2:
+            # .warnslist @user
+            # hedef parse etmek için geçici message.text kullanmadan basit çözelim
+            arg = parts[1].strip()
+            if arg.lstrip("-").isdigit():
+                tid = int(arg)
+            elif arg.startswith("@"):
+                tid = await resolve_username(arg)
+        if tid is None and message.from_user:
+            tid = message.from_user.id
+
+    if tid is None:
         return
 
     w = get_warn(message.chat.id, tid, config)
     reasons = w.get("reasons") or []
     if not reasons:
         return await message.reply("Kayıtlı uyarı sebebi yok.")
-
     lines = [f"<b>{tid}</b> uyarı detayları (son {len(reasons)}):"]
     for i, r in enumerate(reasons[-10:], 1):
         lines.append(f"{i}) by <code>{r.get('by')}</code> | {r.get('at')} | {r.get('reason')}")
@@ -1075,7 +1127,6 @@ async def resetwarns_cmd(message: Message, bot: Bot, config: Config):
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_restrict_members"):
         return await message.reply("Yetki yok: can_restrict_members")
-
     tid = await need_target(message)
     if not tid:
         return
@@ -1085,14 +1136,13 @@ async def resetwarns_cmd(message: Message, bot: Bot, config: Config):
     await message.reply(f"Uyarılar sıfırlandı: <code>{tid}</code>")
 
 @router.message(CMD("ban"))
-async def ban_cmd(message: Message, bot: Bot, config: Config):
+async def ban_cmd(message: Message, bot: Bot):
     if not message.chat or message.chat.type == "private" or not message.from_user:
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_restrict_members"):
         return await message.reply("Yetki yok: can_restrict_members")
     if not await require_bot_right(bot, message.chat.id, "can_restrict_members"):
         return await message.reply("Bot yetkisi yok: can_restrict_members")
-
     tid = await need_target(message)
     if not tid:
         return
@@ -1103,15 +1153,13 @@ async def ban_cmd(message: Message, bot: Bot, config: Config):
         await message.reply(f"Hata: {e}")
 
 @router.message(CMD("tban"))
-async def tban_cmd(message: Message, bot: Bot, config: Config):
-    # .tban @user 2d [sebep]  veya reply .tban 2d
+async def tban_cmd(message: Message, bot: Bot):
     if not message.chat or message.chat.type == "private" or not message.from_user:
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_restrict_members"):
         return await message.reply("Yetki yok: can_restrict_members")
     if not await require_bot_right(bot, message.chat.id, "can_restrict_members"):
         return await message.reply("Bot yetkisi yok: can_restrict_members")
-
     parts = (message.text or "").split()
     if message.reply_to_message:
         if len(parts) < 2:
@@ -1121,15 +1169,12 @@ async def tban_cmd(message: Message, bot: Bot, config: Config):
         if len(parts) < 3:
             return await message.reply("Kullanım: .tban @username 2d [sebep]")
         dur_str = parts[2]
-
     sec = parse_duration_to_seconds(dur_str)
     if sec is None:
         return await message.reply("Süre formatı: 10m, 2h, 1d, 1w, 1h30m (perm: perm)")
-
     tid = await need_target(message)
     if not tid:
         return
-
     until = None if sec == 0 else (datetime.utcnow() + timedelta(seconds=sec))
     try:
         await bot.ban_chat_member(message.chat.id, tid, until_date=until)
@@ -1145,7 +1190,6 @@ async def unban_cmd(message: Message, bot: Bot):
         return await message.reply("Yetki yok: can_restrict_members")
     if not await require_bot_right(bot, message.chat.id, "can_restrict_members"):
         return await message.reply("Bot yetkisi yok: can_restrict_members")
-
     tid = await need_target(message)
     if not tid:
         return
@@ -1163,7 +1207,6 @@ async def kick_cmd(message: Message, bot: Bot):
         return await message.reply("Yetki yok: can_restrict_members")
     if not await require_bot_right(bot, message.chat.id, "can_restrict_members"):
         return await message.reply("Bot yetkisi yok: can_restrict_members")
-
     tid = await need_target(message)
     if not tid:
         return
@@ -1176,14 +1219,12 @@ async def kick_cmd(message: Message, bot: Bot):
 
 @router.message(CMD("softban"))
 async def softban_cmd(message: Message, bot: Bot):
-    # ban + unban (kullanıcıyı atar)
     if not message.chat or message.chat.type == "private" or not message.from_user:
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_restrict_members"):
         return await message.reply("Yetki yok: can_restrict_members")
     if not await require_bot_right(bot, message.chat.id, "can_restrict_members"):
         return await message.reply("Bot yetkisi yok: can_restrict_members")
-
     tid = await need_target(message)
     if not tid:
         return
@@ -1202,15 +1243,12 @@ async def mute_cmd(message: Message, bot: Bot, config: Config):
         return await message.reply("Yetki yok: can_restrict_members")
     if not await require_bot_right(bot, message.chat.id, "can_restrict_members"):
         return await message.reply("Bot yetkisi yok: can_restrict_members")
-
     tid = await need_target(message)
     if not tid:
         return
-
     cs = chat_state(message.chat.id, config)
     mute_sec = int(cs["settings"].get("mute_seconds") or config.default_mute_seconds)
     until = datetime.utcnow() + timedelta(seconds=mute_sec)
-
     try:
         await bot.restrict_chat_member(message.chat.id, tid, permissions=muted_permissions(), until_date=until)
         await message.reply(f"Mute: <code>{tid}</code> ({mute_sec}s)")
@@ -1219,14 +1257,12 @@ async def mute_cmd(message: Message, bot: Bot, config: Config):
 
 @router.message(CMD("tmute"))
 async def tmute_cmd(message: Message, bot: Bot):
-    # .tmute @user 10m [sebep]  veya reply .tmute 10m
     if not message.chat or message.chat.type == "private" or not message.from_user:
         return
     if not await require_user_right(bot, message.chat.id, message.from_user.id, "can_restrict_members"):
         return await message.reply("Yetki yok: can_restrict_members")
     if not await require_bot_right(bot, message.chat.id, "can_restrict_members"):
         return await message.reply("Bot yetkisi yok: can_restrict_members")
-
     parts = (message.text or "").split()
     if message.reply_to_message:
         if len(parts) < 2:
@@ -1236,15 +1272,12 @@ async def tmute_cmd(message: Message, bot: Bot):
         if len(parts) < 3:
             return await message.reply("Kullanım: .tmute @username 10m [sebep]")
         dur_str = parts[2]
-
     sec = parse_duration_to_seconds(dur_str)
     if sec is None or sec == 0:
         return await message.reply("Süre formatı: 10m, 2h, 1d, 1w, 1h30m (perm olmaz)")
-
     tid = await need_target(message)
     if not tid:
         return
-
     until = datetime.utcnow() + timedelta(seconds=sec)
     try:
         await bot.restrict_chat_member(message.chat.id, tid, permissions=muted_permissions(), until_date=until)
@@ -1260,7 +1293,6 @@ async def unmute_cmd(message: Message, bot: Bot):
         return await message.reply("Yetki yok: can_restrict_members")
     if not await require_bot_right(bot, message.chat.id, "can_restrict_members"):
         return await message.reply("Bot yetkisi yok: can_restrict_members")
-
     tid = await need_target(message)
     if not tid:
         return
@@ -1280,7 +1312,6 @@ async def del_cmd(message: Message, bot: Bot):
         return await message.reply("Yetki yok: can_delete_messages")
     if not await require_bot_right(bot, message.chat.id, "can_delete_messages"):
         return await message.reply("Bot yetkisi yok: can_delete_messages")
-
     try:
         await bot.delete_message(message.chat.id, message.reply_to_message.message_id)
     except:
@@ -1300,17 +1331,13 @@ async def purge_cmd(message: Message, bot: Bot):
         return await message.reply("Yetki yok: can_delete_messages")
     if not await require_bot_right(bot, message.chat.id, "can_delete_messages"):
         return await message.reply("Bot yetkisi yok: can_delete_messages")
-
-    # opsiyonel limit: .purge 200
     parts = (message.text or "").split()
     limit = 200
     if len(parts) >= 2 and parts[1].isdigit():
         limit = max(1, min(1000, int(parts[1])))
-
     start_id = message.reply_to_message.message_id
     end_id = message.message_id
     deleted = 0
-
     for mid in range(start_id, end_id + 1):
         try:
             await bot.delete_message(message.chat.id, mid)
@@ -1330,14 +1357,11 @@ async def promote_cmd(message: Message, bot: Bot):
         return await message.reply("Yetki yok: can_promote_members")
     if not await require_bot_right(bot, message.chat.id, "can_promote_members"):
         return await message.reply("Bot yetkisi yok: can_promote_members")
-
     tid = await need_target(message)
     if not tid:
         return
-
     parts = (message.text or "").split(maxsplit=2)
     title = parts[2].strip() if len(parts) >= 3 else None
-
     try:
         await bot.promote_chat_member(
             message.chat.id, tid,
@@ -1371,11 +1395,9 @@ async def demote_cmd(message: Message, bot: Bot):
         return await message.reply("Yetki yok: can_promote_members")
     if not await require_bot_right(bot, message.chat.id, "can_promote_members"):
         return await message.reply("Bot yetkisi yok: can_promote_members")
-
     tid = await need_target(message)
     if not tid:
         return
-
     try:
         await bot.promote_chat_member(
             message.chat.id, tid,
@@ -1435,7 +1457,7 @@ async def on_join(event: ChatMemberUpdated, bot: Bot, config: Config):
             cache[key] = user.id
             schedule_save(config)
 
-    # anti-raid tracker
+    # anti-raid
     if settings.get("antiraid", {}).get("enabled"):
         q = JOINS.setdefault(event.chat.id, deque())
         now = asyncio.get_event_loop().time()
@@ -1446,14 +1468,12 @@ async def on_join(event: ChatMemberUpdated, bot: Bot, config: Config):
 
         threshold = int(settings["antiraid"].get("threshold", 8))
         if len(q) >= threshold:
-            # lockdown: group lock (send_messages false)
             lock_sec = int(settings["antiraid"].get("lock_sec", 120))
             if await require_bot_right(bot, event.chat.id, "can_restrict_members"):
                 try:
                     await bot.set_chat_permissions(event.chat.id, permissions=muted_permissions())
                     cs["raid"]["lockdown_until"] = (utcnow() + timedelta(seconds=lock_sec)).isoformat() + "Z"
                     schedule_save(config)
-                    # grupte bilgilendir
                     try:
                         await bot.send_message(event.chat.id, f"Anti-raid: Grup {lock_sec}s kilitlendi.")
                     except:
@@ -1488,6 +1508,7 @@ async def on_join(event: ChatMemberUpdated, bot: Bot, config: Config):
         except:
             pass
 
+
 @router.callback_query()
 async def verify_callback(call: CallbackQuery, bot: Bot, config: Config):
     if not call.data or not call.message or not call.from_user:
@@ -1510,7 +1531,6 @@ async def verify_callback(call: CallbackQuery, bot: Bot, config: Config):
 
     try:
         await bot.restrict_chat_member(chat_id, target_id, permissions=open_permissions())
-        # pending temizle
         cs.get("captcha_pending", {}).pop(str(target_id), None)
         schedule_save(config)
         try:
@@ -1531,8 +1551,6 @@ async def background_tasks(bot: Bot, config: Config):
     """
     while True:
         await asyncio.sleep(5)
-
-        # tüm chatlerde dolaş (state küçük olmalı)
         chats = list((STATE.get("chats") or {}).items())
         now = utcnow()
 
@@ -1548,7 +1566,6 @@ async def background_tasks(bot: Bot, config: Config):
                 try:
                     until = datetime.fromisoformat(until_iso.replace("Z", ""))
                     if now >= until:
-                        # unlock
                         if await require_bot_right(bot, chat_id, "can_restrict_members"):
                             try:
                                 await bot.set_chat_permissions(chat_id, permissions=open_permissions())
@@ -1557,32 +1574,27 @@ async def background_tasks(bot: Bot, config: Config):
                         cs["raid"]["lockdown_until"] = None
                         schedule_save(config)
                 except:
-                    # bozuk tarih
                     cs["raid"]["lockdown_until"] = None
                     schedule_save(config)
 
-            # captcha timeout
+            # captcha timeout -> kick
             pending = (cs.get("captcha_pending") or {})
-            if not pending:
-                continue
-
-            to_kick = []
-            for uid_str, info in pending.items():
-                exp = info.get("expires_at")
-                if not exp:
-                    continue
-                try:
-                    exp_dt = datetime.fromisoformat(exp.replace("Z", ""))
-                    if now >= exp_dt:
+            if pending:
+                to_kick = []
+                for uid_str, info in list(pending.items()):
+                    exp = info.get("expires_at")
+                    if not exp:
+                        continue
+                    try:
+                        exp_dt = datetime.fromisoformat(exp.replace("Z", ""))
+                        if now >= exp_dt:
+                            to_kick.append(int(uid_str))
+                    except:
                         to_kick.append(int(uid_str))
-                except:
-                    to_kick.append(int(uid_str))
 
-            if to_kick:
-                if await require_bot_right(bot, chat_id, "can_restrict_members"):
+                if to_kick and await require_bot_right(bot, chat_id, "can_restrict_members"):
                     for uid in to_kick:
                         try:
-                            # kick (ban+unban)
                             await bot.ban_chat_member(chat_id, uid)
                             await bot.unban_chat_member(chat_id, uid, only_if_banned=True)
                         except:
@@ -1593,89 +1605,12 @@ async def background_tasks(bot: Bot, config: Config):
 
 # ----------------- OTOMATİK KORUMA / FİLTRELER -----------------
 
-def count_mentions(message: Message) -> int:
-    c = 0
-    if not message.entities:
-        return 0
-    for e in message.entities:
-        if e.type in ("mention", "text_mention"):
-            c += 1
-    return c
-
-def count_emojis(text: str) -> int:
-    # basit emoji sayacı (unicode aralığı)
-    # stabil ve hızlı olsun diye basit tuttuk.
-    n = 0
-    for ch in text:
-        o = ord(ch)
-        if (
-            0x1F300 <= o <= 0x1FAFF or
-            0x2600 <= o <= 0x26FF or
-            0x2700 <= o <= 0x27BF
-        ):
-            n += 1
-    return n
-
-def caps_ratio(text: str) -> float:
-    letters = [c for c in text if c.isalpha()]
-    if not letters:
-        return 0.0
-    upper = sum(1 for c in letters if c.isupper())
-    return upper / max(1, len(letters))
-
-async def try_delete(message: Message, bot: Bot) -> bool:
-    try:
-        if await require_bot_right(bot, message.chat.id, "can_delete_messages"):
-            await message.delete()
-            return True
-    except:
-        pass
-    return False
-
-async def punish_warn_or_tmute(
-    message: Message,
-    bot: Bot,
-    config: Config,
-    reason: str,
-    action: str,
-    tmute_sec: int = 300
-):
-    """
-    action: "warn" | "tmute"
-    """
-    if not message.chat or not message.from_user:
-        return
-
-    # admin dokunma
-    if await is_admin(bot, message.chat.id, message.from_user.id):
-        return
-
-    if action == "warn":
-        await add_warn(message.chat.id, message.from_user.id, by_id=0, reason=reason, config=config)  # by=0 -> sistem
-        # uyarı limiti kontrolü
-        cs = chat_state(message.chat.id, config)
-        limit = int(cs["settings"].get("warn_limit") or config.default_warn_limit)
-        w = get_warn(message.chat.id, message.from_user.id, config)
-        if w["count"] >= limit and await require_bot_right(bot, message.chat.id, "can_restrict_members"):
-            mute_sec = int(cs["settings"].get("mute_seconds") or config.default_mute_seconds)
-            until = datetime.utcnow() + timedelta(seconds=mute_sec)
-            try:
-                await bot.restrict_chat_member(message.chat.id, message.from_user.id, permissions=muted_permissions(), until_date=until)
-            except:
-                pass
-    else:
-        if await require_bot_right(bot, message.chat.id, "can_restrict_members"):
-            until = datetime.utcnow() + timedelta(seconds=tmute_sec)
-            try:
-                await bot.restrict_chat_member(message.chat.id, message.from_user.id, permissions=muted_permissions(), until_date=until)
-            except:
-                pass
-
 @router.message()
 async def auto_guard_handler(message: Message, bot: Bot, config: Config):
     """
     Sıra:
     - service mesaj silme
+    - komut bypass
     - adminonly
     - lock types
     - anti-forward
@@ -1713,7 +1648,7 @@ async def auto_guard_handler(message: Message, bot: Bot, config: Config):
     if not message.from_user:
         return
 
-    # adminonly (admin değilse mesaj sil)
+    # adminonly (admin değilse sil)
     if s.get("adminonly") and not await is_admin(bot, message.chat.id, message.from_user.id):
         await try_delete(message, bot)
         return
@@ -1722,11 +1657,9 @@ async def auto_guard_handler(message: Message, bot: Bot, config: Config):
     if not await is_admin(bot, message.chat.id, message.from_user.id):
         locks = set(s.get("locks") or [])
 
-        # all/media zaten lock komutunda genişletiliyor ama yine de kontrol edelim
         if "links" in locks and message.text and URL_RE.search(message.text):
             await try_delete(message, bot)
             return
-
         if "photos" in locks and message.photo:
             await try_delete(message, bot)
             return
@@ -1745,7 +1678,7 @@ async def auto_guard_handler(message: Message, bot: Bot, config: Config):
         if "voice" in locks and message.voice:
             await try_delete(message, bot)
             return
-        if "audio" in locks and (message.audio or message.voice):
+        if "audio" in locks and message.audio:
             await try_delete(message, bot)
             return
 
@@ -1754,7 +1687,8 @@ async def auto_guard_handler(message: Message, bot: Bot, config: Config):
         is_forward = bool(
             getattr(message, "forward_origin", None) or
             getattr(message, "forward_date", None) or
-            getattr(message, "forward_from_chat", None)
+            getattr(message, "forward_from_chat", None) or
+            getattr(message, "forward_from", None)
         )
         if is_forward:
             await try_delete(message, bot)
@@ -1807,20 +1741,18 @@ async def auto_guard_handler(message: Message, bot: Bot, config: Config):
             q.popleft()
 
         if len(q) >= max_msgs:
-            # flood olunca
             action = str(flood.get("action", "tmute"))
             if action == "warn":
                 await punish_warn_or_tmute(message, bot, config, "flood", action="warn")
             else:
                 tmute_sec = int(flood.get("mute_sec", 300))
                 await punish_warn_or_tmute(message, bot, config, "flood", action="tmute", tmute_sec=tmute_sec)
-            # mesajı silmeye çalış
+
             await try_delete(message, bot)
-            # kuyruğu biraz boşalt
             q.clear()
             return
 
-    # filters (komut değilse)
+    # filters
     if message.text:
         filters = cs.get("filters") or {}
         txt = message.text.lower()
@@ -1847,13 +1779,15 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
+    global BOT_ID
+    BOT_ID = (await bot.get_me()).id
+
     dp = Dispatcher(storage=MemoryStorage())
     dp.update.middleware(InjectConfigMiddleware(config))
     dp.update.middleware(UsernameCacheMiddleware())
 
     dp.include_router(router)
 
-    # background task
     asyncio.create_task(background_tasks(bot, config))
 
     await dp.start_polling(bot)
