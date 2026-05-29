@@ -114,7 +114,7 @@ def mute_perm():
 def main_menu(lang: str):
     l = LANGS[lang]
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=l["add_group"], url=f"https://t.me/{BOT_NAME.replace(' ','')}?startgroup=true")],
+        [InlineKeyboardButton(text=l["add_group"], url="https://t.me/KGBKORUMABOT?startgroup=true")],
         [InlineKeyboardButton(text=l["my_groups"], callback_data="mygroups")],
         [InlineKeyboardButton(text=l["commands"], callback_data="commands")],
         [InlineKeyboardButton(text=l["language"], callback_data="language")],
