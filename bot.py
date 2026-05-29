@@ -280,6 +280,10 @@ async def main_handler(message: Message, bot: Bot):
         await message.reply("✅ Süresiz ban")
         await send_log(bot, message.chat.id, f"🚫 Süresiz ban: {target}")
 
+    member = await bot.get_chat_member(message.chat.id, target)
+if member.status in ("administrator", "creator"):
+    return await message.reply("⚠️ Adminlere işlem yapamam.")
+    
     # ================= UNBAN =================
     if cmd == "unban":
         if not message.reply_to_message:
@@ -322,6 +326,10 @@ async def main_handler(message: Message, bot: Bot):
         await message.reply("✅ Süresiz mute")
         await send_log(bot, message.chat.id, f"🔇 Süresiz mute: {target}")
 
+member = await bot.get_chat_member(message.chat.id, target)
+if member.status in ("administrator", "creator"):
+    return await message.reply("⚠️ Adminlere işlem yapamam.")
+    
     # ================= UNMUTE =================
     if cmd == "unmute":
         if not message.reply_to_message:
