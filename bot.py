@@ -113,6 +113,26 @@ async def commands_panel(call: CallbackQuery):
 
 # ================= MESSAGE HANDLER (TEK MERKEZ) =================
 
+TIME_RE = re.compile(r"(\d+)([smhd])")
+
+def parse_time(text: str):
+    if not text:
+        return None
+    match = TIME_RE.match(text.lower())
+    if not match:
+        return None
+
+    value, unit = match.groups()
+    value = int(value)
+
+    if unit == "s":
+        return value
+    if unit == "m":
+        return value * 60
+    if unit == "h":
+        return value * 3600
+    if unit == "d":
+        return value * 86400
 @router.message()
 async def main_handler(message: Message, bot: Bot):
 
@@ -121,11 +141,30 @@ async def main_handler(message: Message, bot: Bot):
 
     chat = get_chat(message.chat.id)
 
-    # ========= İSTATİSTİK =========
+    # ================= MESSAGE COUNT =================
     uid = str(message.from_user.id)
     chat["stats"][uid] = chat["stats"].get(uid, 0) + 1
 
-    # ========= WELCOME =========
+    # ================= FLOOD SYSTEM =================
+    key = (message.chat.id, message.from_user.id)
+    now = asyncio.get_event_loop().time()
+    FLOOD[key].append(now)
+
+    while FLOOD[key] and now - FLOOD[key][0] > 5:
+        FLOOD[key].popleft()
+
+    if len(FLOOD[key]) >= 6:
+        if not await is_admin(bot, message.chat.id, message.from_user.id):
+            await message.delete()
+            await bot.restrict_chat_member(
+                message.chat.id,
+                message.from_user.id,
+                permissions=mute_perm(),
+                until_date=datetime.utcnow() + timedelta(seconds=60)
+            )
+            return
+
+    # ================= WELCOME / GOODBYE =================
     if message.new_chat_members:
         if chat["welcome"]:
             await message.reply(escape(chat["welcome"]))
@@ -134,15 +173,139 @@ async def main_handler(message: Message, bot: Bot):
         if chat["goodbye"]:
             await message.reply(escape(chat["goodbye"]))
 
-    # ========= KOMUT =========
+    # ================= COMMAND CHECK =================
     if not message.text:
+        save_state()
         return
 
     if not (message.text.startswith("/") or message.text.startswith(".")):
+        save_state()
         return
 
-    cmd = message.text.split()[0][1:].lower()
+    cmd_parts = message.text.split()
+    cmd = cmd_parts[0][1:].lower()
 
+    # ================= ADMIN CHECK FUNCTION =================
+    async def check_admin():
+        if not await is_admin(bot, message.chat.id, message.from_user.id):
+            await message.reply("aq aveli sence yetkin varmı?")
+            return False
+        return True
+
+    # ================= BAN =================
+    if cmd == "ban":
+        if not message.reply_to_message:
+            return
+        if not await check_admin():
+            return
+
+        target = message.reply_to_message.from_user.id
+
+        if len(cmd_parts) == 2:
+            seconds = parse_time(cmd_parts[1])
+            if seconds:
+                until = datetime.utcnow() + timedelta(seconds=seconds)
+                await bot.ban_chat_member(message.chat.id, target, until_date=until)
+                await message.reply(f"✅ {seconds} saniye banlandı")
+                save_state()
+                return
+
+        await bot.ban_chat_member(message.chat.id, target)
+        await message.reply("✅ Süresiz banlandı")
+
+    # ================= UNBAN =================
+    if cmd == "unban":
+        if not message.reply_to_message:
+            return
+        if not await check_admin():
+            return
+        await bot.unban_chat_member(message.chat.id, message.reply_to_message.from_user.id)
+        await message.reply("✅ Ban kaldırıldı")
+
+    # ================= MUTE =================
+    if cmd == "mute":
+        if not message.reply_to_message:
+            return
+        if not await check_admin():
+            return
+
+        target = message.reply_to_message.from_user.id
+
+        if len(cmd_parts) == 2:
+            seconds = parse_time(cmd_parts[1])
+            if seconds:
+                until = datetime.utcnow() + timedelta(seconds=seconds)
+                await bot.restrict_chat_member(
+                    message.chat.id,
+                    target,
+                    permissions=mute_perm(),
+                    until_date=until
+                )
+                await message.reply("✅ Süreli mute atıldı")
+                save_state()
+                return
+
+        await bot.restrict_chat_member(
+            message.chat.id,
+            target,
+            permissions=mute_perm()
+        )
+        await message.reply("✅ Süresiz mute atıldı")
+
+    # ================= UNMUTE =================
+    if cmd == "unmute":
+        if not message.reply_to_message:
+            return
+        if not await check_admin():
+            return
+
+        await bot.restrict_chat_member(
+            message.chat.id,
+            message.reply_to_message.from_user.id,
+            permissions=ChatPermissions(can_send_messages=True)
+        )
+        await message.reply("✅ Mute kaldırıldı")
+
+    # ================= WARN SYSTEM =================
+    if cmd == "warn":
+        if not message.reply_to_message:
+            return
+        if not await check_admin():
+            return
+
+        target = message.reply_to_message.from_user.id
+        warns = chat["warns"]
+        warns[str(target)] = warns.get(str(target), 0) + 1
+
+        if warns[str(target)] >= 3:
+            await bot.restrict_chat_member(
+                message.chat.id,
+                target,
+                permissions=mute_perm()
+            )
+            warns[str(target)] = 0
+            await message.reply("⚠️ 3 warn oldu, otomatik mute ✅")
+        else:
+            await message.reply(f"⚠️ Warn verildi ({warns[str(target)]}/3)")
+
+    # ================= ANTILINK =================
+    if URL_RE.search(message.text):
+        if not await is_admin(bot, message.chat.id, message.from_user.id):
+            await message.delete()
+
+    # ================= ANTI RAID =================
+    if message.new_chat_members:
+        joins = chat.setdefault("joins", [])
+        joins.append(datetime.utcnow().timestamp())
+
+        joins = [j for j in joins if datetime.utcnow().timestamp() - j < 30]
+        chat["joins"] = joins
+
+        if len(joins) >= 5:
+            await bot.set_chat_permissions(message.chat.id, permissions=mute_perm())
+            await message.reply("🚨 Raid algılandı! Grup kilitlendi.")
+
+    save_state()
     # ========= BAN =========
     if cmd == "ban":
         if not message.reply_to_message:
