@@ -489,20 +489,12 @@ async def my_groups(call: CallbackQuery, bot: Bot):
 
 # ================= MAIN =================
 
-async def main():
-    load_state()
-
-    bot = Bot(
-        token=TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-    )
-
-    dp = Dispatcher()
-    dp.include_router(router)
-
-    asyncio.create_task(daily_report(bot))
-
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+def main_menu(lang: str):
+    l = LANGS[lang]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=l["add_group"], url="https://t.me/KGBKORUMABOT?startgroup=true")],
+        [InlineKeyboardButton(text=l["my_groups"], callback_data="mygroups")],
+        [InlineKeyboardButton(text=l["commands"], callback_data="commands")],
+        [InlineKeyboardButton(text=l["language"], callback_data="language")],
+        [InlineKeyboardButton(text=l["support"], url="https://t.me/KGBotomasyon")]
+    ])
