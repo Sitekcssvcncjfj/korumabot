@@ -1,0 +1,8 @@
+{
+  "providers": ["python"],
+  "build": {
+    "env": {
+      "MISE_PYTHON_GITHUB_ATTESTATIONS": "false"
+    }
+  }
+}
