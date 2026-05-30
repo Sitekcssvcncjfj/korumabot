@@ -1,4 +1,3 @@
-BOT_START_TIME = datetime.utcnow()
 import os
 import re
 import json
@@ -9,6 +8,8 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from html import escape
 from typing import Dict, Any
+
+BOT_START_TIME = datetime.utcnow()
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import (
