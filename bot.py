@@ -11,6 +11,12 @@ from typing import Dict, Any
 
 BOT_START_TIME = datetime.utcnow()
 
+def get_total_users():
+    users = set()
+    for chat in STATE["chats"].values():
+        users.update(chat.get("stats", {}).keys())
+    return len(users)
+
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import (
     Message,
@@ -51,56 +57,55 @@ async def start_cmd(message: Message, bot: Bot):
     uptime_str = str(uptime).split(".")[0]
 
     total_groups = len(STATE.get("chats", {}))
+    total_users = get_total_users()
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="🚀 KGB GUARD ULTIMATE'yi Gruba Ekle",
+                text="🚀 Botu Gruba Ekle",
                 url="https://t.me/KGBKORUMABOT?startgroup=true"
             )
         ],
         [
             InlineKeyboardButton(
-                text="📖 Moderasyon Komutları",
-                callback_data="commands_menu"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="📊 Ortak Gruplarım",
-                callback_data="my_groups"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="⚙️ Admin Kontrol Paneli",
+                text="⚙️ Admin Paneli",
                 callback_data="admin_panel"
             )
         ],
         [
             InlineKeyboardButton(
-                text="📢 Resmi Destek Kanalı",
+                text="📖 Komutlar",
+                callback_data="commands_menu"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📊 Gruplarım",
+                callback_data="my_groups"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📢 Destek Kanalı",
                 url="https://t.me/KGBotomasyon"
             )
         ]
     ])
 
     await message.reply(
-        "👑 <b>KGB GUARD ULTIMATE</b>\n\n"
-        "🛡 <b>Kurumsal Seviye Grup Güvenlik Sistemi</b>\n\n"
-        "🔹 Akıllı Spam & Flood Algılama\n"
-        "🔹 Gelişmiş Raid Savunma Mekanizması\n"
-        "🔹 Yetki & Moderasyon Yönetimi\n"
-        "🔹 Otomatik Ceza ve Uyarı Sistemi\n"
-        "🔹 Not & Filtre Altyapısı\n\n"
-        f"👥 <b>Aktif Kullanıcı:</b> 256\n"
-        f"📂 <b>Kayıtlı Grup:</b> {total_groups}\n"
-        f"⏳ <b>Uptime:</b> {uptime_str}\n\n"
+        f"👑 <b>KGB GUARD ULTIMATE</b>\n\n"
+        f"🟢 <b>Sistem Durumu:</b> ONLINE\n"
+        f"🛡 <b>Koruma Modu:</b> AKTİF\n\n"
+        f"👥 Aktif Kullanıcı: {total_users}\n"
+        f"📂 Kayıtlı Grup: {total_groups}\n"
+        f"⏳ Uptime: {uptime_str}\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "⚙️ Aşağıdan bir işlem seçerek devam edebilirsin.",
+        "Profesyonel Grup Güvenlik Altyapısı",
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
-    )# ================= COMMANDS BUTTON =================
+    )
+
+       # ================= COMMANDS BUTTON =================
 
 @router.callback_query(lambda c: c.data == "commands_menu")
 async def commands_menu(call: CallbackQuery):
@@ -413,6 +418,76 @@ async def main_handler(message: Message, bot: Bot):
             await message.reply(lang["no_perm"])
             return False
         return True
+
+if cmd == "kick":
+    if not message.reply_to_message: return
+    if not await check_perm(): return
+    target = message.reply_to_message.from_user.id
+    await bot.ban_chat_member(message.chat.id, target)
+    await bot.unban_chat_member(message.chat.id, target)
+    await message.reply("Kullanıcı atıldı ✅")
+
+if cmd == "softban":
+    if not message.reply_to_message: return
+    if not await check_perm(): return
+    target = message.reply_to_message.from_user.id
+    await bot.ban_chat_member(message.chat.id, target)
+    await bot.unban_chat_member(message.chat.id, target)
+    await message.reply("Softban uygulandı ✅")
+
+if cmd == "resetwarn":
+    if not message.reply_to_message: return
+    if not await check_perm(): return
+    target = message.reply_to_message.from_user.id
+    chat["warns"][str(target)] = 0
+    await message.reply("Warn sıfırlandı ✅")
+
+if cmd == "warns":
+    if not message.reply_to_message: return
+    target = message.reply_to_message.from_user.id
+    count = chat["warns"].get(str(target), 0)
+    await message.reply(f"Toplam warn: {count}")
+
+if cmd == "antilink":
+    if not await check_perm(): return
+    if len(cmd_parts) < 2: return
+    chat["antilink"] = cmd_parts[1].lower() == "on"
+    await message.reply("Antilink güncellendi ✅")
+
+if cmd == "setlog":
+    if not await check_perm(): return
+    if len(cmd_parts) < 2: return
+    chat["log"] = int(cmd_parts[1])
+    await message.reply("Log kanalı ayarlandı ✅")
+
+if cmd == "stats":
+    total_users = get_total_users()
+    total_groups = len(STATE["chats"])
+    await message.reply(
+        f"👥 Aktif Kullanıcı: {total_users}\n"
+        f"📂 Grup Sayısı: {total_groups}"
+    )
+
+if cmd == "id":
+    await message.reply(f"Kullanıcı ID: {message.from_user.id}")
+
+if cmd == "admins":
+    admins = await bot.get_chat_administrators(message.chat.id)
+    text = "Yöneticiler:\n"
+    for a in admins:
+        text += f"- {a.user.full_name}\n"
+    await message.reply(text)
+
+if cmd == "purge":
+    if not message.reply_to_message: return
+    if not await check_perm(): return
+    start_id = message.reply_to_message.message_id
+    end_id = message.message_id
+    for msg_id in range(start_id, end_id):
+        try:
+            await bot.delete_message(message.chat.id, msg_id)
+        except:
+            pass
 
     # ================= MOD ROLE =================
     if cmd == "addmod":
