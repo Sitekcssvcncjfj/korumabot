@@ -33,8 +33,17 @@ BOT_NAME = "KGB GUARD ULTIMATE"
 router = Router()
 STATE: Dict[str, Any] = {"chats": {}, "blacklist": []}
 
-@router.callback_query(lambda c: c.data == "back_main")
-async def back_main(call: CallbackQuery):
+
+
+FLOOD = defaultdict(lambda: deque())
+
+URL_RE = re.compile(r"(https?://|t\.me/)", re.IGNORECASE)
+TIME_RE = re.compile(r"(\d+)([smhd])")
+
+# ================= START PANEL =================
+
+@router.message(CommandStart())
+async def start_cmd(message: Message):
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -63,7 +72,7 @@ async def back_main(call: CallbackQuery):
         ]
     ])
 
-    await call.message.edit_text(
+    await message.reply(
         "👋 <b>KGB GUARD ULTIMATE</b>\n\n"
         "🛡 Profesyonel Grup Koruma Botu\n"
         "✅ Rose mantığı\n"
@@ -74,6 +83,8 @@ async def back_main(call: CallbackQuery):
         parse_mode=ParseMode.HTML
     )
 
+# ================= COMMANDS BUTTON =================
+
 @router.callback_query(lambda c: c.data == "commands_menu")
 async def commands_menu(call: CallbackQuery):
 
@@ -82,7 +93,7 @@ async def commands_menu(call: CallbackQuery):
 
 <b>🔨 Ban</b>
 /ban (reply)
- /ban 10m
+/ban 10m
 
 <b>🔇 Mute</b>
 /mute
@@ -125,13 +136,15 @@ Sticker kilidi
         ])
     )
 
+# ================= MY GROUPS BUTTON =================
+
 @router.callback_query(lambda c: c.data == "my_groups")
 async def my_groups(call: CallbackQuery, bot: Bot):
 
     user_id = call.from_user.id
     common_groups = []
 
-    for chat_id in STATE["chats"]:
+    for chat_id in STATE.get("chats", {}):
         try:
             member = await bot.get_chat_member(int(chat_id), user_id)
             if member.status in ("administrator", "creator", "member"):
@@ -155,15 +168,49 @@ async def my_groups(call: CallbackQuery, bot: Bot):
         ])
     )
 
+# ================= BACK BUTTON =================
+
 @router.callback_query(lambda c: c.data == "back_main")
-async def back_main(call: CallbackQuery, bot: Bot):
-    await start_cmd(call.message, bot)
+async def back_main(call: CallbackQuery):
 
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="➕ Beni Gruba Ekle 🚀",
+                url="https://t.me/KGBKORUMABOT?startgroup=true"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📖 Komutlar",
+                callback_data="commands_menu"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📊 Gruplarım",
+                callback_data="my_groups"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📢 Kanal Destek",
+                url="https://t.me/KGBotomasyon"
+            )
+        ]
+    ])
 
-FLOOD = defaultdict(lambda: deque())
+    await call.message.edit_text(
+        "👋 <b>KGB GUARD ULTIMATE</b>\n\n"
+        "🛡 Profesyonel Grup Koruma Botu\n"
+        "✅ Rose mantığı\n"
+        "✅ Mod sistemi\n"
+        "✅ AntiSpam\n\n"
+        "Aşağıdan işlem seç 👇",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
 
-URL_RE = re.compile(r"(https?://|t\.me/)", re.IGNORECASE)
-TIME_RE = re.compile(r"(\d+)([smhd])")
 
 # ================= LANGUAGE =================
 
