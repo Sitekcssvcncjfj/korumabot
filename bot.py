@@ -71,8 +71,11 @@ def get_blacklist():
 # ================= PERMISSIONS =================
 
 async def is_admin(bot: Bot, chat_id: int, user_id: int):
-    member = await bot.get_chat_member(chat_id, user_id)
-    return member.status in ("administrator", "creator")
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
+    except:
+        return False
 
 async def has_permission(bot: Bot, chat_id: int, user_id: int):
     if await is_admin(bot, chat_id, user_id):
@@ -113,7 +116,6 @@ def main_menu():
             text="➕ KGB GUARD PRO’yu Gruba Ekle 🚀",
             url=f"https://t.me/{BOT_USERNAME}?startgroup=true"
         )],
-        [InlineKeyboardButton(text="🛡 Admin Panel", callback_data="adminpanel")],
         [InlineKeyboardButton(text="📢 Kanal Destek", url="https://t.me/KGBotomasyon")]
     ])
 
@@ -127,15 +129,6 @@ async def start_cmd(message: Message):
 """
     await message.reply(text, reply_markup=main_menu(), parse_mode=ParseMode.HTML)
 
-@router.callback_query(lambda c: c.data == "adminpanel")
-async def admin_panel(call: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚙ Flood Ayar", callback_data="floodinfo")],
-        [InlineKeyboardButton(text="🚨 Raid Ayar", callback_data="raidinfo")],
-        [InlineKeyboardButton(text="📊 Günlük Rapor", callback_data="dailyreport")]
-    ])
-    await call.message.edit_text("<b>Admin Panel</b>", reply_markup=kb, parse_mode=ParseMode.HTML)
-
 # ================= MAIN HANDLER =================
 
 @router.message()
@@ -146,44 +139,41 @@ async def main_handler(message: Message, bot: Bot):
 
     chat = get_chat(message.chat.id)
 
-    # BLACKLIST
-    if message.from_user.id in get_blacklist():
-        try:
+    # BLACKLIST SAFE
+    try:
+        if message.from_user.id in get_blacklist():
             await bot.ban_chat_member(message.chat.id, message.from_user.id)
-        except:
-            pass
-        return
+            return
+    except:
+        pass
 
     # MESSAGE COUNT
     uid = str(message.from_user.id)
     chat["stats"][uid] = chat["stats"].get(uid, 0) + 1
 
-    # FLOOD
-    key = (message.chat.id, message.from_user.id)
-    now = asyncio.get_event_loop().time()
-    FLOOD[key].append(now)
+    # FLOOD SAFE
+    try:
+        key = (message.chat.id, message.from_user.id)
+        now = asyncio.get_event_loop().time()
+        FLOOD[key].append(now)
 
-    while FLOOD[key] and now - FLOOD[key][0] > chat["flood"]["seconds"]:
-        FLOOD[key].popleft()
+        while FLOOD[key] and now - FLOOD[key][0] > chat["flood"]["seconds"]:
+            FLOOD[key].popleft()
 
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+        member = await bot.get_chat_member(message.chat.id, message.from_user.id)
 
-    if len(FLOOD[key]) >= chat["flood"]["limit"]:
-        if member.status not in ("administrator", "creator"):
-            await message.delete()
-            await bot.restrict_chat_member(
-                message.chat.id,
-                message.from_user.id,
-                permissions=mute_perm(),
-                until_date=datetime.utcnow() + timedelta(seconds=60)
-            )
-            return
-
-    # ANTILINK
-    if chat["antilink"] and message.text and URL_RE.search(message.text):
-        if member.status not in ("administrator", "creator"):
-            await message.delete()
-            return
+        if len(FLOOD[key]) >= chat["flood"]["limit"]:
+            if member.status not in ("administrator", "creator"):
+                await message.delete()
+                await bot.restrict_chat_member(
+                    message.chat.id,
+                    message.from_user.id,
+                    permissions=mute_perm(),
+                    until_date=datetime.utcnow() + timedelta(seconds=60)
+                )
+                return
+    except:
+        pass
 
     # COMMAND CHECK
     if not message.text:
@@ -203,25 +193,34 @@ async def main_handler(message: Message, bot: Bot):
             return False
         return True
 
-    # BAN
+    # BAN SAFE
     if cmd == "ban":
-        if not message.reply_to_message: return
-        if not await check_perm(): return
+        if not message.reply_to_message:
+            return
+        if not await check_perm():
+            return
         target = message.reply_to_message.from_user.id
-        member = await bot.get_chat_member(message.chat.id, target)
-        if member.status in ("administrator", "creator"):
-            return await message.reply("⚠ Adminlere işlem yapamam")
 
-        if len(cmd_parts) == 2:
-            sec = parse_time(cmd_parts[1])
-            if sec:
-                until = datetime.utcnow() + timedelta(seconds=sec)
-                await bot.ban_chat_member(message.chat.id, target, until_date=until)
-                await message.reply("✅ Süreli ban")
-                return
+        try:
+            member = await bot.get_chat_member(message.chat.id, target)
+            if member.status in ("administrator", "creator"):
+                return await message.reply("⚠ Adminlere işlem yapamam")
+        except:
+            return
 
-        await bot.ban_chat_member(message.chat.id, target)
-        await message.reply("✅ Süresiz ban")
+        try:
+            if len(cmd_parts) == 2:
+                sec = parse_time(cmd_parts[1])
+                if sec:
+                    until = datetime.utcnow() + timedelta(seconds=sec)
+                    await bot.ban_chat_member(message.chat.id, target, until_date=until)
+                    await message.reply("✅ Süreli ban")
+                    return
+
+            await bot.ban_chat_member(message.chat.id, target)
+            await message.reply("✅ Süresiz ban")
+        except:
+            pass
 
     save_state()
 
@@ -238,7 +237,8 @@ async def daily_report(bot: Bot):
 
         for chat_id, data in STATE["chats"].items():
             stats = data.get("stats", {})
-            if not stats: continue
+            if not stats:
+                continue
 
             top = sorted(stats.items(), key=lambda x: x[1], reverse=True)[:20]
             text = "📊 <b>Günlük Aktivite</b>\n\n"
