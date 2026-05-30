@@ -3,6 +3,7 @@ import re
 import json
 import asyncio
 from aiogram.filters import CommandStart
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from html import escape
@@ -32,15 +33,132 @@ BOT_NAME = "KGB GUARD ULTIMATE"
 router = Router()
 STATE: Dict[str, Any] = {"chats": {}, "blacklist": []}
 
-@router.message(CommandStart())
-async def start_cmd(message: Message):
-    await message.reply(
-        "👋 Merhaba!\n\n"
-        "🛡 <b>KGB GUARD ULTIMATE</b> aktif.\n\n"
-        "Beni bir gruba ekleyip yönetici yap.\n"
-        "Komutlar gruplarda çalışır ✅",
+@router.callback_query(lambda c: c.data == "back_main")
+async def back_main(call: CallbackQuery):
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="➕ Beni Gruba Ekle 🚀",
+                url="https://t.me/KGBKORUMABOT?startgroup=true"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📖 Komutlar",
+                callback_data="commands_menu"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📊 Gruplarım",
+                callback_data="my_groups"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📢 Kanal Destek",
+                url="https://t.me/KGBotomasyon"
+            )
+        ]
+    ])
+
+    await call.message.edit_text(
+        "👋 <b>KGB GUARD ULTIMATE</b>\n\n"
+        "🛡 Profesyonel Grup Koruma Botu\n"
+        "✅ Rose mantığı\n"
+        "✅ Mod sistemi\n"
+        "✅ AntiSpam\n\n"
+        "Aşağıdan işlem seç 👇",
+        reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
+
+@router.callback_query(lambda c: c.data == "commands_menu")
+async def commands_menu(call: CallbackQuery):
+
+    text = """
+<b>🛡 Moderasyon Komutları</b>
+
+<b>🔨 Ban</b>
+/ban (reply)
+ /ban 10m
+
+<b>🔇 Mute</b>
+/mute
+/mute 5m
+
+<b>⚠ Warn</b>
+/warn (3 warn = auto mute)
+
+<b>👑 Mod Sistemi</b>
+/addmod
+/delmod
+
+<b>📦 Not</b>
+/save isim içerik
+/get isim
+
+<b>🎯 Filtre</b>
+/filter kelime cevap
+/stop kelime
+
+<b>🌊 Flood</b>
+/setflood 6 5
+
+<b>🚨 Raid</b>
+/setraid 5 30
+
+<b>🔐 Kilit</b>
+Antilink
+Medya kilidi
+Sticker kilidi
+
+✅ Tüm komutlar / veya . ile çalışır.
+"""
+
+    await call.message.edit_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Geri", callback_data="back_main")]
+        ])
+    )
+
+@router.callback_query(lambda c: c.data == "my_groups")
+async def my_groups(call: CallbackQuery, bot: Bot):
+
+    user_id = call.from_user.id
+    common_groups = []
+
+    for chat_id in STATE["chats"]:
+        try:
+            member = await bot.get_chat_member(int(chat_id), user_id)
+            if member.status in ("administrator", "creator", "member"):
+                chat = await bot.get_chat(int(chat_id))
+                common_groups.append(chat.title)
+        except:
+            continue
+
+    if not common_groups:
+        text = "Bot ile ortak grubun yok."
+    else:
+        text = "<b>Ortak Gruplar:</b>\n\n"
+        for g in common_groups[:20]:
+            text += f"• {escape(g)}\n"
+
+    await call.message.edit_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Geri", callback_data="back_main")]
+        ])
+    )
+
+@router.callback_query(lambda c: c.data == "back_main")
+async def back_main(call: CallbackQuery, bot: Bot):
+    await start_cmd(call.message, bot)
+
 
 FLOOD = defaultdict(lambda: deque())
 
