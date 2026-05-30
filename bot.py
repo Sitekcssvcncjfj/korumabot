@@ -48,83 +48,93 @@ async def start_cmd(message: Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="➕ Beni Gruba Ekle 🚀",
+                text="🚀 KGB GUARD ULTIMATE'yi Gruba Ekle",
                 url="https://t.me/KGBKORUMABOT?startgroup=true"
             )
         ],
         [
             InlineKeyboardButton(
-                text="📖 Komutlar",
+                text="📖 Tüm Moderasyon Komutlarını Gör",
                 callback_data="commands_menu"
             )
         ],
         [
             InlineKeyboardButton(
-                text="📊 Gruplarım",
+                text="📊 Bot ile Ortak Gruplarımı Gör",
                 callback_data="my_groups"
             )
         ],
         [
             InlineKeyboardButton(
-                text="📢 Kanal Destek",
+                text="📢 Resmi Destek Kanalı",
                 url="https://t.me/KGBotomasyon"
             )
         ]
     ])
 
     await message.reply(
-        "👋 <b>KGB GUARD ULTIMATE</b>\n\n"
-        "🛡 Profesyonel Grup Koruma Botu\n"
-        "✅ Rose mantığı\n"
-        "✅ Mod sistemi\n"
-        "✅ AntiSpam\n\n"
-        "Aşağıdan işlem seç 👇",
+        "👑 <b>KGB GUARD ULTIMATE</b>\n\n"
+        "🛡 <b>Gelişmiş Profesyonel Grup Güvenlik Sistemi</b>\n\n"
+        "✅ Akıllı Anti-Spam Koruması\n"
+        "✅ Gelişmiş Flood & Raid Savunması\n"
+        "✅ Mod & Yetki Yönetim Sistemi\n"
+        "✅ Otomatik Uyarı & Ceza Mekanizması\n"
+        "✅ Not & Filtre Altyapısı\n"
+        "✅ Günlük Aktivite Raporu\n\n"
+        "👥 <b>Aktif Kullanıcı:</b> 256\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "⚙️ Aşağıdan bir işlem seçerek devam edebilirsin.",
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
-
 # ================= COMMANDS BUTTON =================
 
 @router.callback_query(lambda c: c.data == "commands_menu")
 async def commands_menu(call: CallbackQuery):
 
     text = """
-<b>🛡 Moderasyon Komutları</b>
+👑 <b>KGB GUARD ULTIMATE — Komut Paneli</b>
 
-<b>🔨 Ban</b>
-/ban (reply)
-/ban 10m
+━━━━━━━━━━━━━━━━━━
 
-<b>🔇 Mute</b>
-/mute
-/mute 5m
+🔨 <b>Yasaklama</b>
+• /ban (reply)
+• /ban 10m
+• /unban
 
-<b>⚠ Warn</b>
-/warn (3 warn = auto mute)
+🔇 <b>Susturma</b>
+• /mute
+• /mute 5m
+• /unmute
 
-<b>👑 Mod Sistemi</b>
-/addmod
-/delmod
+⚠️ <b>Uyarı Sistemi</b>
+• /warn (3 warn = otomatik mute)
 
-<b>📦 Not</b>
-/save isim içerik
-/get isim
+👑 <b>Yetki Yönetimi</b>
+• /addmod
+• /delmod
 
-<b>🎯 Filtre</b>
-/filter kelime cevap
-/stop kelime
+📦 <b>Not Sistemi</b>
+• /save isim içerik
+• /get isim
+• /delnote isim
 
-<b>🌊 Flood</b>
-/setflood 6 5
+🎯 <b>Filtre Sistemi</b>
+• /filter kelime cevap
+• /stop kelime
 
-<b>🚨 Raid</b>
-/setraid 5 30
+🌊 <b>Flood Kontrol</b>
+• /setflood limit saniye
 
-<b>🔐 Kilit</b>
-Antilink
-Medya kilidi
-Sticker kilidi
+🚨 <b>Raid Koruma</b>
+• /setraid limit saniye
 
+🔐 <b>Kilit Sistemleri</b>
+• Antilink
+• Medya Kilidi
+• Sticker Kilidi
+
+━━━━━━━━━━━━━━━━━━
 ✅ Tüm komutlar / veya . ile çalışır.
 """
 
@@ -132,10 +142,9 @@ Sticker kilidi
         text,
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Geri", callback_data="back_main")]
+            [InlineKeyboardButton(text="🔙 Ana Menüye Dön", callback_data="back_main")]
         ])
     )
-
 # ================= MY GROUPS BUTTON =================
 
 @router.callback_query(lambda c: c.data == "my_groups")
