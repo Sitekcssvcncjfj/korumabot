@@ -1,3 +1,4 @@
+BOT_START_TIME = datetime.utcnow()
 import os
 import re
 import json
@@ -43,7 +44,12 @@ TIME_RE = re.compile(r"(\d+)([smhd])")
 # ================= START PANEL =================
 
 @router.message(CommandStart())
-async def start_cmd(message: Message):
+async def start_cmd(message: Message, bot: Bot):
+
+    uptime = datetime.utcnow() - BOT_START_TIME
+    uptime_str = str(uptime).split(".")[0]
+
+    total_groups = len(STATE.get("chats", {}))
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -54,14 +60,20 @@ async def start_cmd(message: Message):
         ],
         [
             InlineKeyboardButton(
-                text="📖 Tüm Moderasyon Komutlarını Gör",
+                text="📖 Moderasyon Komutları",
                 callback_data="commands_menu"
             )
         ],
         [
             InlineKeyboardButton(
-                text="📊 Bot ile Ortak Gruplarımı Gör",
+                text="📊 Ortak Gruplarım",
                 callback_data="my_groups"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="⚙️ Admin Kontrol Paneli",
+                callback_data="admin_panel"
             )
         ],
         [
@@ -74,20 +86,20 @@ async def start_cmd(message: Message):
 
     await message.reply(
         "👑 <b>KGB GUARD ULTIMATE</b>\n\n"
-        "🛡 <b>Gelişmiş Profesyonel Grup Güvenlik Sistemi</b>\n\n"
-        "✅ Akıllı Anti-Spam Koruması\n"
-        "✅ Gelişmiş Flood & Raid Savunması\n"
-        "✅ Mod & Yetki Yönetim Sistemi\n"
-        "✅ Otomatik Uyarı & Ceza Mekanizması\n"
-        "✅ Not & Filtre Altyapısı\n"
-        "✅ Günlük Aktivite Raporu\n\n"
-        "👥 <b>Aktif Kullanıcı:</b> 256\n\n"
+        "🛡 <b>Kurumsal Seviye Grup Güvenlik Sistemi</b>\n\n"
+        "🔹 Akıllı Spam & Flood Algılama\n"
+        "🔹 Gelişmiş Raid Savunma Mekanizması\n"
+        "🔹 Yetki & Moderasyon Yönetimi\n"
+        "🔹 Otomatik Ceza ve Uyarı Sistemi\n"
+        "🔹 Not & Filtre Altyapısı\n\n"
+        f"👥 <b>Aktif Kullanıcı:</b> 256\n"
+        f"📂 <b>Kayıtlı Grup:</b> {total_groups}\n"
+        f"⏳ <b>Uptime:</b> {uptime_str}\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "⚙️ Aşağıdan bir işlem seçerek devam edebilirsin.",
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
-    )
-# ================= COMMANDS BUTTON =================
+    )# ================= COMMANDS BUTTON =================
 
 @router.callback_query(lambda c: c.data == "commands_menu")
 async def commands_menu(call: CallbackQuery):
@@ -147,6 +159,31 @@ async def commands_menu(call: CallbackQuery):
     )
 # ================= MY GROUPS BUTTON =================
 
+@router.callback_query(lambda c: c.data == "admin_panel")
+async def admin_panel(call: CallbackQuery):
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🌊 Flood Ayarlarını Gör", callback_data="flood_info")
+        ],
+        [
+            InlineKeyboardButton(text="🚨 Raid Ayarlarını Gör", callback_data="raid_info")
+        ],
+        [
+            InlineKeyboardButton(text="📊 Günlük İstatistik", callback_data="daily_stats")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Ana Menü", callback_data="back_main")
+        ]
+    ])
+
+    await call.message.edit_text(
+        "<b>⚙️ ADMIN KONTROL PANELİ</b>\n\n"
+        "Buradan sistem ayarlarını inceleyebilirsin.",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
 @router.callback_query(lambda c: c.data == "my_groups")
 async def my_groups(call: CallbackQuery, bot: Bot):
 
@@ -158,12 +195,13 @@ async def my_groups(call: CallbackQuery, bot: Bot):
             member = await bot.get_chat_member(int(chat_id), user_id)
             if member.status in ("administrator", "creator", "member"):
                 chat = await bot.get_chat(int(chat_id))
-                common_groups.append(chat.title)
+                count = await bot.get_chat_member_count(int(chat_id))
+                common_groups.append(f"{chat.title} ({count} üye)")
         except:
             continue
 
     if not common_groups:
-        text = "Bot ile ortak grubun yok."
+        text = "Bot ile ortak grubun bulunamadı."
     else:
         text = "<b>Ortak Gruplar:</b>\n\n"
         for g in common_groups[:20]:
@@ -173,7 +211,7 @@ async def my_groups(call: CallbackQuery, bot: Bot):
         text,
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Geri", callback_data="back_main")]
+            [InlineKeyboardButton(text="🔙 Ana Menü", callback_data="back_main")]
         ])
     )
 
