@@ -419,76 +419,108 @@ async def main_handler(message: Message, bot: Bot):
             return False
         return True
 
-if cmd == "kick":
-    if not message.reply_to_message: return
-    if not await check_perm(): return
-    target = message.reply_to_message.from_user.id
-    await bot.ban_chat_member(message.chat.id, target)
-    await bot.unban_chat_member(message.chat.id, target)
-    await message.reply("Kullanıcı atıldı ✅")
+    # ================= KICK =================
+    if cmd == "kick":
+        if not message.reply_to_message:
+            return
+        if not await check_perm():
+            return
 
-if cmd == "softban":
-    if not message.reply_to_message: return
-    if not await check_perm(): return
-    target = message.reply_to_message.from_user.id
-    await bot.ban_chat_member(message.chat.id, target)
-    await bot.unban_chat_member(message.chat.id, target)
-    await message.reply("Softban uygulandı ✅")
+        target = message.reply_to_message.from_user.id
+        await bot.ban_chat_member(message.chat.id, target)
+        await bot.unban_chat_member(message.chat.id, target)
+        await message.reply("Kullanıcı atıldı ✅")
 
-if cmd == "resetwarn":
-    if not message.reply_to_message: return
-    if not await check_perm(): return
-    target = message.reply_to_message.from_user.id
-    chat["warns"][str(target)] = 0
-    await message.reply("Warn sıfırlandı ✅")
+    # ================= SOFTBAN =================
+    if cmd == "softban":
+        if not message.reply_to_message:
+            return
+        if not await check_perm():
+            return
 
-if cmd == "warns":
-    if not message.reply_to_message: return
-    target = message.reply_to_message.from_user.id
-    count = chat["warns"].get(str(target), 0)
-    await message.reply(f"Toplam warn: {count}")
+        target = message.reply_to_message.from_user.id
+        await bot.ban_chat_member(message.chat.id, target)
+        await bot.unban_chat_member(message.chat.id, target)
+        await message.reply("Softban uygulandı ✅")
 
-if cmd == "antilink":
-    if not await check_perm(): return
-    if len(cmd_parts) < 2: return
-    chat["antilink"] = cmd_parts[1].lower() == "on"
-    await message.reply("Antilink güncellendi ✅")
+    # ================= RESET WARN =================
+    if cmd == "resetwarn":
+        if not message.reply_to_message:
+            return
+        if not await check_perm():
+            return
 
-if cmd == "setlog":
-    if not await check_perm(): return
-    if len(cmd_parts) < 2: return
-    chat["log"] = int(cmd_parts[1])
-    await message.reply("Log kanalı ayarlandı ✅")
+        target = message.reply_to_message.from_user.id
+        chat["warns"][str(target)] = 0
+        await message.reply("Warn sıfırlandı ✅")
 
-if cmd == "stats":
-    total_users = get_total_users()
-    total_groups = len(STATE["chats"])
-    await message.reply(
-        f"👥 Aktif Kullanıcı: {total_users}\n"
-        f"📂 Grup Sayısı: {total_groups}"
-    )
+    # ================= WARNS =================
+    if cmd == "warns":
+        if not message.reply_to_message:
+            return
 
-if cmd == "id":
-    await message.reply(f"Kullanıcı ID: {message.from_user.id}")
+        target = message.reply_to_message.from_user.id
+        count = chat["warns"].get(str(target), 0)
+        await message.reply(f"Toplam warn: {count}")
 
-if cmd == "admins":
-    admins = await bot.get_chat_administrators(message.chat.id)
-    text = "Yöneticiler:\n"
-    for a in admins:
-        text += f"- {a.user.full_name}\n"
-    await message.reply(text)
+    # ================= ANTILINK =================
+    if cmd == "antilink":
+        if not await check_perm():
+            return
+        if len(cmd_parts) < 2:
+            return
 
-if cmd == "purge":
-    if not message.reply_to_message: return
-    if not await check_perm(): return
-    start_id = message.reply_to_message.message_id
-    end_id = message.message_id
-    for msg_id in range(start_id, end_id):
-        try:
-            await bot.delete_message(message.chat.id, msg_id)
-        except:
-            pass
+        chat["antilink"] = cmd_parts[1].lower() == "on"
+        await message.reply("Antilink güncellendi ✅")
 
+    # ================= SETLOG =================
+    if cmd == "setlog":
+        if not await check_perm():
+            return
+        if len(cmd_parts) < 2:
+            return
+
+        chat["log"] = int(cmd_parts[1])
+        await message.reply("Log kanalı ayarlandı ✅")
+
+    # ================= STATS =================
+    if cmd == "stats":
+        total_users = get_total_users()
+        total_groups = len(STATE["chats"])
+        await message.reply(
+            f"👥 Aktif Kullanıcı: {total_users}\n"
+            f"📂 Grup Sayısı: {total_groups}"
+        )
+
+    # ================= ID =================
+    if cmd == "id":
+        await message.reply(f"Kullanıcı ID: {message.from_user.id}")
+
+    # ================= ADMINS =================
+    if cmd == "admins":
+        admins = await bot.get_chat_administrators(message.chat.id)
+        text = "Yöneticiler:\n"
+        for a in admins:
+            text += f"- {a.user.full_name}\n"
+        await message.reply(text)
+
+    # ================= PURGE =================
+    if cmd == "purge":
+        if not message.reply_to_message:
+            return
+        if not await check_perm():
+            return
+
+        start_id = message.reply_to_message.message_id
+        end_id = message.message_id
+
+        for msg_id in range(start_id, end_id):
+            try:
+                await bot.delete_message(message.chat.id, msg_id)
+            except:
+                pass
+
+    save_state()
     # ================= MOD ROLE =================
     if cmd == "addmod":
         if not await is_admin(bot, message.chat.id, message.from_user.id):
