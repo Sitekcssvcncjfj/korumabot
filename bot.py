@@ -2,6 +2,7 @@ import os
 import re
 import json
 import asyncio
+from aiogram.filters import CommandStart
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from html import escape
@@ -30,6 +31,17 @@ BOT_NAME = "KGB GUARD ULTIMATE"
 
 router = Router()
 STATE: Dict[str, Any] = {"chats": {}, "blacklist": []}
+
+@router.message(CommandStart())
+async def start_cmd(message: Message):
+    await message.reply(
+        "👋 Merhaba!\n\n"
+        "🛡 <b>KGB GUARD ULTIMATE</b> aktif.\n\n"
+        "Beni bir gruba ekleyip yönetici yap.\n"
+        "Komutlar gruplarda çalışır ✅",
+        parse_mode=ParseMode.HTML
+    )
+
 FLOOD = defaultdict(lambda: deque())
 
 URL_RE = re.compile(r"(https?://|t\.me/)", re.IGNORECASE)
